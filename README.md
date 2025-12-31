@@ -12,38 +12,25 @@ This project is intended for **Marlin-based firmware**, including **Prusa firmwa
 ## Table of Contents
 
 <details>
-<summary>Click to expand</summary>
+<summary><strong>Table of contents</strong></summary>
 
-- [Status](#status)
-- [Quick start](#quick-start)
+- [Overview](#overview)
+- [Supported firmware](#supported-firmware)
+- [Installation](#installation)
 - [PrusaSlicer configuration](#prusaslicer-configuration)
   - [Start G-code](#start-g-code)
   - [Before and after layer change](#before-and-after-layer-change)
-  - [End G-code](#end-g-code)
-- [How it works](#how-it-works)
-  - [State model](#state-model)
-  - [Layer-change gating timeline](#layer-change-gating-timeline)
 - [Command-line arguments](#command-line-arguments)
   - [Serial connection](#serial-connection)
   - [GPIO inputs](#gpio-inputs)
   - [Jam detection tuning](#jam-detection-tuning)
   - [Diagnostics and safety](#diagnostics-and-safety)
-- [Installation](#installation)
-  - [1) OS packages](#1-os-packages)
-  - [2) Python dependencies](#2-python-dependencies)
-- [GPIO backend selection](#gpio-backend-selection)
-  - [Legacy backend: `python3-rpi.gpio`](#legacy-backend-python3-rpigpio)
-  - [Modern backend (recommended on Debian Trixie and newer): `python3-rpi-lgpio`](#modern-backend-recommended-on-debian-trixie-and-newer-python3-rpi-lgpio)
-- [Wiring](#wiring)
-  - [Generic wiring](#generic-wiring)
-  - [Example: BTT SFS v2 0](#example-btt-sfs-v2-0)
-- [Usage](#usage)
-- [Systemd service](#systemd-service)
-- [Logging](#logging)
 - [Known limitations](#known-limitations)
-- [Troubleshooting](#troubleshooting)
+- [Systemd service](#systemd-service)
+- [Unit tests](#unit-tests)
 
 </details>
+
 ## Status
 Release status: **1.0.0-beta**
 
@@ -137,7 +124,7 @@ stateDiagram-v2
 ```
 
 **State legend**
-- **DISABLED** — monitoring is off; motion and runout checks are ignored.
+- **DISABLED** — monitoring is off; motion and runout checks are ignored because runout monitoring is disabled.
 - **ENABLED_UNARMED** — enabled, but insufficient motion history has been observed to trust jam detection.
 - **ENABLED_ARMED** — enabled and armed; jam/runout conditions can trigger a pause.
 - **LATCHED** — a pause has been triggered; no further actions occur until reset.
