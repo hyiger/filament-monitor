@@ -376,7 +376,36 @@ def run_doctor(args):
     print("  - Toggle runout to test runout.")
     print("  Ctrl+C to exit.")
     print()
-
+    # Optional serial echo check (safe): if a port is provided, send a unique M118 token and
+    # look for it to be echoed back. This helps confirm that the printer is reachable and
+    # that M118 A1 messages are visible on the host side.
+    if getattr(args, "port", None):
+        try:
+            ser = serial.Serial(args.port, args.baud, timeout=0.5)
+            token = f"filmon:doctor {int(time.time())}"
+            ser.write(f"M118 A1 {token}\\n".encode())
+            ser.flush()
+            deadline = time.monotonic() + 3.0
+            echoed = False
+            while time.monotonic() < deadline:
+                line = ser.readline().decode(errors="replace").strip()
+                if token.lower() in line.lower():
+                    echoed = True
+                    break
+            if echoed:
+                print("  OK: serial echo seen")
+            else:
+                print("  WARN: no serial echo observed (is M118 echoed to host?)")
+        except Exception as e:
+            print(f"  WARN: serial check failed: {e}")
+        finally:
+            try:
+                ser.close()
+            except Exception:
+                pass
+    else:
+        print("  INFO: no -p/--port provided; skipping serial echo check")
+    print()
     motion = DigitalInputDevice(args.motion_gpio, pull_up=True)
     pulse_count = 0
 
@@ -440,7 +469,7 @@ def run_self_test(args):
     motion = DigitalInputDevice(args.motion_gpio, pull_up=True)
     pulse_count = 0
 
-    """Increment the local pulse counter for this diagnostic test."""
+    # Increment the local pulse counter for this diagnostic test.
     def on_pulse():
         """Increment a local pulse counter for this diagnostic test."""
         nonlocal pulse_count
@@ -493,7 +522,7 @@ def build_arg_parser():
     ap.add_argument("--verbose", action="store_true", help="Verbose logging (includes serial chatter).")
     ap.add_argument("--no-banner", action="store_true", help="Disable the startup banner.")
     ap.add_argument("--runout-active-high", action="store_true", default=False, help="Treat the runout signal as active-high (default is active-low).")
-    ap.add_argument("--doctor", action="store_true", help="Run host/printer diagnostics (GPIO + serial checks) and exit.")
+    ap.add_argument("--doctor", action="store_true", help="Run host diagnostics (GPIO, optional serial echo) and exit.")
     ap.add_argument("--self-test", action="store_true", help="Dry-run mode: monitor inputs and parsing but do not send pause commands.")
     ap.add_argument("--pause-gcode", default="M600", help="G-code to send when a jam/runout is detected (default: M600).")
     ap.add_argument("--jam-timeout", type=float, default=8.0, help="Seconds without motion pulses (after arming) before declaring a jam (default: 8.0).")
