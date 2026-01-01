@@ -42,6 +42,9 @@ This project is intended for **Marlin-based firmware**, including **Prusa firmwa
 - [Logging](#logging)
 - [Known limitations](#known-limitations)
 - [Troubleshooting](#troubleshooting)
+- [Design Philosophy (Jam-Resistant Operation)](#design-philosophy-jam-resistant-operation)
+- [Safety Invariants](#safety-invariants)
+- [Pause Latch Behavior](#pause-latch-behavior)
 
 </details>
 ## Status
