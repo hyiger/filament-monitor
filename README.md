@@ -372,6 +372,72 @@ When run under systemd, view logs with:
 journalctl -u filament-monitor.service -f
 ```
 
+
+## Diagnostic Breadcrumb Logging
+
+The monitor supports **breadcrumb logging** to provide low-rate, aggregated insight into filament motion without logging every sensor pulse. Breadcrumbs are intended for **tuning, validation, and post‑mortem analysis**, not for normal production logging.
+
+Breadcrumbs are **disabled by default** and are automatically enabled when running with `--verbose`.
+
+### Emitted breadcrumb events
+
+**`hb` — Heartbeat**  
+Emitted periodically while the monitor is enabled (default: every 2 seconds).
+
+Includes:
+- `dt_since_pulse` — seconds since the last motion pulse
+- `pps` — pulses per second over a sliding window
+- `pulses_reset` — pulses since last reset
+- `enabled`, `armed`, `latched` — current state
+
+Used to establish normal pulse cadence and measure worst‑case legitimate pulse gaps.
+
+**`stall` — Stall breadcrumb**  
+Emitted when `dt_since_pulse` exceeds configured thresholds **while armed**.
+
+Defaults: `3s`, `6s`
+
+Used to observe pulse starvation leading up to a jam and to verify that retract/travel patterns do **not** cause false triggers.
+
+**`first_pulse_after_arm`**  
+Emitted once after arming, when the first motion pulse is observed. Confirms correct arming placement and sensor engagement.
+
+**`pause_triggered`**  
+When a jam or runout is detected, the pause event includes breadcrumb evidence such as `dt_since_pulse`, `pps`, and pulse counters.
+
+### Breadcrumb-related command-line options
+
+```
+--verbose
+    Enable diagnostic logging, including breadcrumb events (hb, stall, etc).
+
+--breadcrumb-interval SECONDS
+    Heartbeat interval while enabled (default: 2.0).
+    Set to 0 to disable heartbeat breadcrumbs.
+
+--stall-thresholds SECONDS[,SECONDS...]
+    Comma-separated list of stall thresholds in seconds.
+    Default: 3,6
+
+--pulse-window SECONDS
+    Sliding window used to compute pulses-per-second (pps).
+    Default: 2.0
+```
+
+### Log formats
+
+Breadcrumbs are available in both log formats:
+
+- **Human-readable logs**
+  - Millisecond timestamps
+  - Suitable for live inspection (`tail -f`)
+- **JSON logs (`--json`)**
+  - Recommended for analysis and tooling
+  - Stable field names
+  - One JSON object per line (JSONL)
+
+Breadcrumbs indicate **observed conditions**, not errors. A stall breadcrumb does not imply a jam; it simply records a period without detected filament motion.
+
 ## Known limitations
 - **Sensor resolution at ultra-low flow.** Pulse-based sensors (e.g. BTT SFS v2.0 at ~2.88 mm/pulse) can have long legitimate gaps
   between pulses when extrusion is extremely slow or highly segmented. In these regimes, time-based “no pulses for N seconds” detection
@@ -453,3 +519,66 @@ When a jam or runout is detected:
 
 This latch is explicitly tested to prevent repeated pause commands
 (“jam storms”) during recovery or user intervention.
+
+## Arming Policy (Production)
+
+Jam detection must only be active during extrusion regimes where filament motion is resolvable by the sensor.
+
+**Validated policy (recommended):**
+- **Reset + enable** at print start
+- **Arm at the start of Layer 2**
+- **Remain armed** for the remainder of the print
+- **Disable** at print end
+
+This policy avoids ultra-low-flow conditions on the first layer and has been validated under:
+- continuous extrusion
+- slow perimeters
+- heavy retraction and travel (island printing)
+
+### PrusaSlicer implementation
+
+**Printer Settings → Start G-code**
+```gcode
+M118 A1 filmon:reset
+M118 A1 filmon:enable
+```
+
+**Print Settings → Before layer change G-code**
+```gcode
+{if layer_num==1}M118 A1 filmon:arm{endif}
+```
+
+**Printer Settings → End G-code**
+```gcode
+M118 A1 filmon:disable
+```
+
+Do **not** arm during the first layer or during known ultra-low-flow features.
+
+## Sensor Resolution and Limitations
+
+Motion-based jam detection is constrained by sensor resolution.
+
+For the BTT SFS v2.0:
+- **Calibration:** ~2.88 mm of filament per pulse
+
+At very low volumetric flow rates, legitimate extrusion may advance **less than one pulse** over several seconds. In these regimes, pulse-absence alone cannot distinguish normal extrusion from a jam.
+
+**Implications:**
+- Jam detection must be **disabled or unarmed** during ultra-low-flow extrusion
+- Increasing `jam_timeout_s` indefinitely is not a viable solution
+- Marker-based arming is the intended mitigation
+
+Breadcrumb logging exists to measure these limits empirically.
+
+## Default Parameters
+
+The following defaults are chosen to balance detection latency and false-positive resistance:
+
+- `jam_timeout_s`: **8.0**
+- `stall_thresholds`: **3,6**
+- `breadcrumb_interval`: **2.0**
+- `pulse_window`: **2.0**
+
+These values are validated for typical PLA printing with a 0.4 mm nozzle and normal perimeter/infill speeds. Adjust only after reviewing breadcrumb data.
+
