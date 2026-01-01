@@ -35,7 +35,11 @@ def _write_line(fd: int, line: str) -> None:
 
 @pytest.mark.integration
 def test_virtual_serial_prusa_like_jam_triggers_pause(tmp_path: Path):
-    """Simulate a Marlin/Prusa-like printer over a PTY and assert pause_gcode is sent."""
+    """Simulate a Marlin/Prusa-like printer over a PTY and assert pause_gcode is sent.
+
+    This test must **never hang**. We always terminate the monitor subprocess and collect logs via
+    communicate(timeout=...) rather than blocking on stdout.read().
+    """
     repo_root = Path(__file__).resolve().parents[1]
     script = repo_root / "filament-monitor.py"
     assert script.exists(), f"Missing script at {script}"
@@ -51,7 +55,7 @@ def test_virtual_serial_prusa_like_jam_triggers_pause(tmp_path: Path):
             slave_path,
             "--baud",
             "115200",
-                        "--arm-min-pulses",
+            "--arm-min-pulses",
             "0",
             "--jam-timeout",
             "1.0",
@@ -67,7 +71,11 @@ def test_virtual_serial_prusa_like_jam_triggers_pause(tmp_path: Path):
         bufsize=1,
     )
 
+    pause_seen = False
+    out = ""
+
     try:
+        # Fake printer boot + ok responses
         _write_line(master_fd, "start")
         _write_line(master_fd, "echo:Marlin 2.x (Prusa-like)")
         _write_line(master_fd, "echo:Machine Type: Core One (simulated)")
@@ -76,25 +84,21 @@ def test_virtual_serial_prusa_like_jam_triggers_pause(tmp_path: Path):
         time.sleep(0.4)
         _ = _read_available(master_fd, 0.2)
 
+        # Markers
         _write_line(master_fd, "M118 A1 filmon:reset")
         _write_line(master_fd, "ok")
         _write_line(master_fd, "M118 A1 filmon:enable")
         _write_line(master_fd, "ok")
 
+        # Some extrusion moves (enough to make "jam expected" meaningful)
         _write_line(master_fd, "G92 E0")
         _write_line(master_fd, "ok")
         _write_line(master_fd, "M83")
         _write_line(master_fd, "ok")
-
         _write_line(master_fd, "G1 X10 Y10 E1.2 F1200")
-        _write_line(master_fd, "ok")
-        _write_line(master_fd, "G1 X20 Y20 E1.2 F1200")
-        _write_line(master_fd, "ok")
-        _write_line(master_fd, "G1 X30 Y30 E1.2 F1200")
         _write_line(master_fd, "ok")
 
         deadline = time.time() + 5.0
-        pause_seen = False
         while time.time() < deadline and not pause_seen:
             data = _read_available(master_fd, 0.2)
             if b"M600" in data:
@@ -102,23 +106,22 @@ def test_virtual_serial_prusa_like_jam_triggers_pause(tmp_path: Path):
                 break
             time.sleep(0.05)
 
-        out = ""
-        if proc.stdout:
-            try:
-                out = proc.stdout.read() or ""
-            except Exception:
-                out = ""
-
-        assert pause_seen, f"Expected pause gcode (M600) not sent. Monitor output:\n{out}"
-
     finally:
+        # Always terminate and collect logs without blocking indefinitely.
         try:
             proc.terminate()
-            proc.wait(timeout=2)
+            out, _ = proc.communicate(timeout=2)
         except Exception:
             try:
                 proc.kill()
+                out, _ = proc.communicate(timeout=2)
+            except Exception:
+                out = out or ""
+
+        for fd in (master_fd, slave_fd):
+            try:
+                os.close(fd)
             except Exception:
                 pass
-        os.close(master_fd)
-        os.close(slave_fd)
+
+    assert pause_seen, f"Expected pause gcode (M600) not sent. Monitor output:\n{out}"
