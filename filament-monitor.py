@@ -528,6 +528,12 @@ def main():
         return 0
 
     args = ap.parse_args()
+    # Serial (pyserial) is required to connect to the printer.
+    if serial is None:  # pragma: no cover
+        print("ERROR: pyserial is not installed. Install it with: pip install pyserial", file=sys.stderr)
+        return 2
+
+
 
     # Runout option guardrails
     # - Runout monitoring is disabled by default.
@@ -536,7 +542,9 @@ def main():
 
     ignored_runout_flags = []
     if getattr(args, "runout_gpio", None) is not None and not getattr(args, "runout_enabled", False):
-        ignored_runout_flags.append("--runout-gpio")
+        # Only warn if the user explicitly provided --runout-gpio. The default is harmless.
+        if "--runout-gpio" in sys.argv:
+            ignored_runout_flags.append("--runout-gpio")
         args.runout_gpio = None
 
     if getattr(args, "runout_debounce", None) is not None and not getattr(args, "runout_enabled", False):

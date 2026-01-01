@@ -12,13 +12,13 @@ This project is intended for **Marlin-based firmware**, including **Prusa firmwa
 ## Table of Contents
 
 <details>
-<summary><strong>Click to expand</strong></summary>
+<summary>Click to expand</summary>
 
 - [Status](#status)
 - [Quick start](#quick-start)
 - [PrusaSlicer configuration](#prusaslicer-configuration)
   - [Start G-code](#start-g-code)
-  - [Layer change G-code](#layer-change-g-code-important)
+  - [Before and after layer change](#before-and-after-layer-change)
   - [End G-code](#end-g-code)
 - [How it works](#how-it-works)
   - [State model](#state-model)
@@ -36,14 +36,12 @@ This project is intended for **Marlin-based firmware**, including **Prusa firmwa
   - [Modern backend (recommended on Debian Trixie and newer): `python3-rpi-lgpio`](#modern-backend-recommended-on-debian-trixie-and-newer-python3-rpi-lgpio)
 - [Wiring](#wiring)
   - [Generic wiring](#generic-wiring)
-  - [Example: BTT SFS v2.0](#example-btt-sfs-v20)
+  - [Example: BTT SFS v2 0](#example-btt-sfs-v2-0)
 - [Usage](#usage)
 - [Systemd service](#systemd-service)
 - [Logging](#logging)
 - [Known limitations](#known-limitations)
 - [Troubleshooting](#troubleshooting)
-- [Integration tests (virtual serial)](#integration-tests-virtual-serial)
-- [Running unit tests](#running-unit-tests)
 
 </details>
 ## Status
@@ -87,24 +85,28 @@ Recommended (defensive): add a disable near the top of Start G-code (helps if th
 M118 A1 filmon:disable
 ```
 
-### Layer change G-code (important)
+### Before and after layer change
+If your firmware does not echo positive extrusion (`E > 0`) to the serial console, the monitor cannot infer when extrusion is *expected*. To avoid false jam detections during layer-change travel/Z moves, gate monitoring per layer:
 
-**Do NOT place state-changing control markers in Before or After layer change G-code.**
-
-PrusaSlicer layer-change hooks run **once per layer**. Repeating any of the following during a print will reset or de-arm the monitor mid-print and can create blind windows:
-
-- `filmon:enable`
-- `filmon:disable`
-- `filmon:reset`
-
-If you want a per-layer breadcrumb for debugging, use a **non-stateful** marker only, for example:
-
+**Before layer change G-code**
 ```gcode
-;AFTER_LAYER_CHANGE
-M118 A1 filmon:layer
+;BEFORE_LAYER_CHANGE
+M118 A1 filmon:disable
 ```
 
-Breadcrumb markers are informational only and do not affect monitoring state.
+**After layer change G-code**
+```gcode
+;AFTER_LAYER_CHANGE
+M118 A1 filmon:enable
+```
+
+Optional per-layer reset (usually unnecessary):
+```gcode
+;AFTER_LAYER_CHANGE
+M118 A1 filmon:reset
+M118 A1 filmon:enable
+```
+
 ### End G-code
 Disable monitoring early in End G-code:
 
@@ -146,18 +148,21 @@ Control marker mapping:
 - *filmon reset* → `filmon:reset`
 
 ### Layer-change gating timeline
-
-This section is **conceptual**: it explains why jam detection must ignore non-extruding travel/Z moves and only become active once the monitor is armed.
-
-**Important:** PrusaSlicer layer-change hooks run once per layer and must **not** be used to emit state-changing markers (`filmon:enable` / `filmon:disable` / `filmon:reset`). Use **Start G-code** and **End G-code** for one-shot state control.
-
-A simplified view of the print lifecycle:
+When firmware does not echo positive extrusion values (`E > 0`) to the serial console, the monitor cannot infer when extrusion is expected. PrusaSlicer layer-change hooks are therefore used to explicitly gate monitoring.
 
 ```
-startup → (filmon:reset) → (filmon:enable) → arming (motion pulses) → monitoring (jam checks) → (filmon:disable) → shutdown
+… extrusion …
+   |
+   |  BEFORE_LAYER_CHANGE  →  filmon:disable
+   |  (travel / Z lift / wipe / dwell)
+   |
+   |  AFTER_LAYER_CHANGE   →  filmon:enable
+   |
+… extrusion …
 ```
 
-The monitor’s arming threshold and jam timeout provide the “gating” effect by preventing false jam detections during periods where extrusion is not expected.
+This gating prevents false jam detections during non-extruding moves while still allowing fast detection once extrusion resumes.
+
 
 ## Command-line arguments
 
@@ -211,6 +216,9 @@ python filament-monitor.py -p /dev/ttyACM0 \
 ```
 
 ## Installation
+
+
+> **Note:** `pyserial` is required to connect to the printer over USB/serial.
 
 All installation and configuration instructions are maintained in this README.
 
