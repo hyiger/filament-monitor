@@ -24,8 +24,8 @@ Usage examples:
   # Motion + runout inputs (BCM numbering)
   python filament-monitor.py -p /dev/ttyACM0 --motion-gpio 26 --runout-gpio 27 --runout-enabled --runout-active-high
 
-  # Conservative jam tuning
-  python filament-monitor.py -p /dev/ttyACM0 --arm-min-pulses 12 --jam-timeout-s 8.0
+  # Conservative jam tuning (marker-driven arming)
+  python filament-monitor.py -p /dev/ttyACM0 --jam-timeout 8 --stall-thresholds 3,6 --verbose --json
 
   # Safe dry-run (does not send pause commands)
   python filament-monitor.py --self-test -p /dev/ttyACM0
@@ -205,7 +205,7 @@ class FilamentMonitor:
         verbose: bool = False,
         breadcrumb_interval_s: float = 2.0,
         pulse_window_s: float = 2.0,
-        stall_thresholds_s: Optional[str] = "2,4",
+        stall_thresholds_s: Optional[str] = "3,6",
     ):
         """
         Initialize the monitor.
@@ -228,7 +228,7 @@ class FilamentMonitor:
             if stall_thresholds_s:
                 self._stall_thresholds_s = sorted({float(x.strip()) for x in str(stall_thresholds_s).split(",") if x.strip()})
         except Exception:
-            self._stall_thresholds_s = [2.0, 4.0]
+            self._stall_thresholds_s = [3.0, 6.0]
         self._stall_next_idx = 0
         self._next_hb_ts = now_s() + self._breadcrumb_interval_s
         self.jam_timeout_s = jam_timeout_s
@@ -506,7 +506,7 @@ class FilamentMonitor:
         self._stop_evt.set()
 
     def _loop(self):
-        """Main periodic loop. Arms on sufficient pulses and checks for jam/runout faults."""
+        """Main periodic loop. Processes control markers and checks for jam/runout faults."""
         while not self._stop_evt.is_set():
             try:
                 line = self._serial_q.get(timeout=0.2)
@@ -663,7 +663,7 @@ def config_defaults_from(cfg: dict) -> dict:
         "json": _get_cfg(cfg, "logging", "json", False),
         "breadcrumb_interval": _get_cfg(cfg, "logging", "breadcrumb_interval", 2.0),
         "pulse_window": _get_cfg(cfg, "logging", "pulse_window", 2.0),
-        "stall_thresholds": _get_cfg(cfg, "logging", "stall_thresholds", "2,4"),
+        "stall_thresholds": _get_cfg(cfg, "logging", "stall_thresholds", "3,6"),
     }
 
 
@@ -682,41 +682,50 @@ def resolved_config_dict(args) -> dict:
             "jam_timeout": args.jam_timeout,
             "pause_gcode": args.pause_gcode,
         },
-        "logging": {"verbose": args.verbose, "no_banner": args.no_banner, "breadcrumb_interval": args.breadcrumb_interval, "pulse_window": args.pulse_window, "stall_thresholds": args.stall_thresholds, "json": bool(getattr(args, "json", False))},
+        "logging": {
+            "verbose": args.verbose,
+            "no_banner": args.no_banner,
+            "breadcrumb_interval": args.breadcrumb_interval,
+            "pulse_window": args.pulse_window,
+            "stall_thresholds": args.stall_thresholds,
+            "json": bool(args.json),
+        },
     }
 
 
 def build_arg_parser(defaults=None):
     """Construct the CLI argument parser for the daemon."""
     ap = argparse.ArgumentParser(epilog=USAGE_EXAMPLES, formatter_class=RawDescriptionHelpFormatter)
-    if defaults:
-        ap.set_defaults(**defaults)
-    ap.set_defaults(json=False)
+    # Defaults are sourced from the built-in defaults, and optionally overridden by TOML config
+    # (we backfill unset CLI args after parsing).
+    if defaults is None:
+        defaults = config_defaults_from({})
+    ap.set_defaults(**defaults)
     ap.add_argument("-p", "--port", help="Serial device for the printer connection (e.g., /dev/ttyACM0).")
-    ap.add_argument("--baud", type=int, default=115200, help="Serial baud rate for the printer connection (default: 115200).")
-    ap.add_argument("--motion-gpio", type=int, default=26, help="BCM GPIO pin number for the filament motion pulse input.")
-    ap.add_argument("--runout-gpio", type=int, default=27, help="BCM GPIO pin number for the optional runout input.")
+    ap.add_argument("--baud", type=int, help="Serial baud rate for the printer connection.")
+    ap.add_argument("--motion-gpio", type=int, help="BCM GPIO pin number for the filament motion pulse input.")
+    ap.add_argument("--runout-gpio", type=int, help="BCM GPIO pin number for the optional runout input.")
     ap.add_argument("--runout-enabled", dest="runout_enabled", action="store_true", help="Enable runout monitoring (default: disabled).")
     ap.add_argument("--runout-disabled", dest="runout_enabled", action="store_false", help="Disable runout monitoring.")
-    ap.add_argument("--runout-debounce", type=float, default=None, help="Debounce time (seconds) applied to the runout input to ignore short glitches.")
+    ap.add_argument("--runout-debounce", type=float, help="Debounce time (seconds) applied to the runout input to ignore short glitches.")
     ap.add_argument("--verbose", dest="verbose", action="store_true", help="Verbose logging (includes serial chatter).")
     ap.add_argument("--no-verbose", dest="verbose", action="store_false", help="Disable verbose logging.")
-    ap.add_argument("--json", dest="json", action="store_true", default=None, help="Emit JSON log events (default: disabled).")
-    ap.add_argument("--no-json", dest="json", action="store_false", default=None, help="Disable JSON log output.")
+    json_group = ap.add_mutually_exclusive_group()
+    json_group.add_argument("--json", dest="json", action="store_true", help="Emit JSON log events.")
+    json_group.add_argument("--no-json", dest="json", action="store_false", help="Disable JSON log output.")
     ap.add_argument("--no-banner", dest="no_banner", action="store_true", help="Disable the startup banner.")
     ap.add_argument("--banner", dest="no_banner", action="store_false", help="Enable the startup banner.")
-    ap.add_argument("--runout-active-high", action="store_true", default=False, help="Treat the runout signal as active-high (default is active-low).")
+    ap.add_argument("--runout-active-high", action="store_true", help="Treat the runout signal as active-high.")
     ap.add_argument("--doctor", action="store_true", help="Run host/printer diagnostics (GPIO + serial checks) and exit.")
     ap.add_argument("--self-test", action="store_true", help="Dry-run mode: monitor inputs and parsing but do not send pause commands.")
-    ap.add_argument("--pause-gcode", default="M600", help="G-code to send when a jam/runout is detected (default: M600).")
-    ap.add_argument("--jam-timeout", type=float, default=8.0, help="Seconds without motion pulses (after arming) before declaring a jam (default: 8.0).")
-    ap.add_argument("--arm-min-pulses", type=int, default=12, help="Minimum motion pulses required before jam detection is armed.")
-    ap.add_argument("--breadcrumb-interval", type=float, default=2.0,
-                    help="Emit a low-volume heartbeat log every N seconds while enabled (default: 2.0). Set 0 to disable.")
-    ap.add_argument("--pulse-window", type=float, default=2.0,
-                    help="Window (seconds) used to compute pulses-per-second (pps) for breadcrumbs (default: 2.0).")
-    ap.add_argument("--stall-thresholds", default="2,4",
-                    help="Comma-separated seconds-since-last-pulse thresholds at which to emit 'stall' breadcrumbs while armed (default: 2,4).")
+    ap.add_argument("--pause-gcode", help="G-code to send when a jam/runout is detected.")
+    ap.add_argument("--jam-timeout", type=float, help="Seconds without motion pulses (after arming) before declaring a jam.")
+    ap.add_argument("--arm-min-pulses", type=int, help="(Legacy/unused) Jam detection is marker-driven via filmon:arm.")
+    ap.add_argument("--breadcrumb-interval", type=float,
+                    help="Emit a low-volume heartbeat log every N seconds while enabled. Set 0 to disable.")
+    ap.add_argument("--pulse-window", type=float,
+                    help="Window (seconds) used to compute pulses-per-second (pps) for breadcrumbs.")
+    ap.add_argument("--stall-thresholds", help="Comma-separated seconds-since-last-pulse thresholds for 'stall' breadcrumbs while armed.")
     ap.add_argument("--config", help="Path to a TOML config file. CLI args override config values.")
     ap.add_argument("--print-config", action="store_true", help="Print the resolved configuration and exit.")
     ap.add_argument("--version", action="store_true", help="Print version and exit.")
