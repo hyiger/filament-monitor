@@ -21,7 +21,7 @@ runout_gpio = 27
 runout_active_high = false
 
 # Optional debounce (seconds); omit or set to null to disable
-runout_debounce = null
+# runout_debounce = 0.05  # seconds (optional)
 
 [detection]
 # Minimum pulses before jam detection is armed
