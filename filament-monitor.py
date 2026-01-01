@@ -603,9 +603,16 @@ def main():
         return 0
 
     args = ap.parse_args()
-    if getattr(args, 'print_config', False):
-        print(json.dumps(resolved_config_dict(args), indent=2, sort_keys=True))
-        return 0
+
+# Apply TOML configuration (if provided). CLI arguments take precedence.
+# Note: We only fill values that are unset/empty on the CLI.
+if getattr(args, "config", None):
+    cfg = load_toml_config(args.config)
+    defaults = config_defaults_from(cfg)
+    for k, v in defaults.items():
+        # Only backfill fields that are unset/empty from the CLI.
+        if getattr(args, k, None) in (None, ""):
+            setattr(args, k, v)
     # Serial (pyserial) is required to connect to the printer.
     if serial is None:  # pragma: no cover
         print("ERROR: pyserial is not installed. Install it with: pip install pyserial", file=sys.stderr)
