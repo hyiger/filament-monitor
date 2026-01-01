@@ -12,25 +12,38 @@ This project is intended for **Marlin-based firmware**, including **Prusa firmwa
 ## Table of Contents
 
 <details>
-<summary><strong>Table of contents</strong></summary>
+<summary>Click to expand</summary>
 
-- [Overview](#overview)
-- [Supported firmware](#supported-firmware)
-- [Installation](#installation)
+- [Status](#status)
+- [Quick start](#quick-start)
 - [PrusaSlicer configuration](#prusaslicer-configuration)
   - [Start G-code](#start-g-code)
   - [Before and after layer change](#before-and-after-layer-change)
+  - [End G-code](#end-g-code)
+- [How it works](#how-it-works)
+  - [State model](#state-model)
+  - [Layer-change gating timeline](#layer-change-gating-timeline)
 - [Command-line arguments](#command-line-arguments)
   - [Serial connection](#serial-connection)
   - [GPIO inputs](#gpio-inputs)
   - [Jam detection tuning](#jam-detection-tuning)
   - [Diagnostics and safety](#diagnostics-and-safety)
-- [Known limitations](#known-limitations)
+- [Installation](#installation)
+  - [1) OS packages](#1-os-packages)
+  - [2) Python dependencies](#2-python-dependencies)
+- [GPIO backend selection](#gpio-backend-selection)
+  - [Legacy backend: `python3-rpi.gpio`](#legacy-backend-python3-rpigpio)
+  - [Modern backend (recommended on Debian Trixie and newer): `python3-rpi-lgpio`](#modern-backend-recommended-on-debian-trixie-and-newer-python3-rpi-lgpio)
+- [Wiring](#wiring)
+  - [Generic wiring](#generic-wiring)
+  - [Example: BTT SFS v2 0](#example-btt-sfs-v2-0)
+- [Usage](#usage)
 - [Systemd service](#systemd-service)
-- [Unit tests](#unit-tests)
+- [Logging](#logging)
+- [Known limitations](#known-limitations)
+- [Troubleshooting](#troubleshooting)
 
 </details>
-
 ## Status
 Release status: **1.0.0-beta**
 
@@ -124,7 +137,7 @@ stateDiagram-v2
 ```
 
 **State legend**
-- **DISABLED** — monitoring is off; motion and runout checks are ignored because runout monitoring is disabled.
+- **DISABLED** — monitoring is off; motion and runout checks are ignored.
 - **ENABLED_UNARMED** — enabled, but insufficient motion history has been observed to trust jam detection.
 - **ENABLED_ARMED** — enabled and armed; jam/runout conditions can trigger a pause.
 - **LATCHED** — a pause has been triggered; no further actions occur until reset.
@@ -156,7 +169,8 @@ This gating prevents false jam detections during non-extruding moves while still
 - Running with **no arguments** prints the built-in help and usage examples.
 - `-h/--help` includes a short **Usage examples** section.
 
-These options control how the filament monitor connects to the printer, interprets filament motion, and decides when to pause. The table text below is synced to the script’s `argparse` help strings.
+These options control how the monitor connects to the printer, interprets filament motion, and decides when to pause.
+The table below is synced to the script’s `argparse` help strings.
 
 ### Serial connection
 
@@ -170,27 +184,36 @@ These options control how the filament monitor connects to the printer, interpre
 | Argument | Purpose | Default |
 |---------|---------|---------|
 | `--motion-gpio` | BCM GPIO pin number for the filament motion pulse input. | `26` |
-| `--runout-gpio` | BCM GPIO pin number for the optional runout input. | `27` |
 | `--runout-enabled` | Enable runout monitoring (default: disabled). | `False` |
-| `--runout-active-high` | Treat the runout signal as active-high (default is active-low). | `False` |
+| `--runout-gpio` | BCM GPIO pin number for the optional runout input. | `27` |
 | `--runout-debounce` | Debounce time (seconds) applied to the runout input to ignore short glitches. | `` |
+| `--runout-active-high` | Treat the runout signal as active-high (default is active-low). | `False` |
 
 ### Jam detection tuning
 
 | Argument | Purpose | Default |
 |---------|---------|---------|
 | `--arm-min-pulses` | Minimum motion pulses required before jam detection is armed. | `12` |
+| `--jam-timeout` | Seconds without motion pulses (after arming) before declaring a jam (default: 8.0). | `8.0` |
 | `--pause-gcode` | G-code to send when a jam/runout is detected (default: M600). | `M600` |
 
 ### Diagnostics and safety
 
 | Argument | Purpose | Default |
 |---------|---------|---------|
-| `--self-test` | Dry-run mode: monitor inputs and parsing but do not send pause commands. | `False` |
 | `--doctor` | Run host/printer diagnostics (GPIO + serial checks) and exit. | `False` |
+| `--self-test` | Dry-run mode: monitor inputs and parsing but do not send pause commands. | `False` |
 | `--verbose` | Verbose logging (includes serial chatter). | `False` |
 | `--no-banner` | Disable the startup banner. | `False` |
-| `--version` | Minimum motion pulses required before jam detection is armed. | `False` |
+| `--version` | Print version and exit. | `False` |
+
+Example (motion + optional runout):
+```bash
+python filament-monitor.py -p /dev/ttyACM0 \
+  --motion-gpio 26 \
+  --runout-enabled \
+  --runout-gpio 27
+```
 
 ## Installation
 

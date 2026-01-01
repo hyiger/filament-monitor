@@ -485,9 +485,9 @@ def build_arg_parser():
     ap.add_argument("--doctor", action="store_true", help="Run host/printer diagnostics (GPIO + serial checks) and exit.")
     ap.add_argument("--self-test", action="store_true", help="Dry-run mode: monitor inputs and parsing but do not send pause commands.")
     ap.add_argument("--pause-gcode", default="M600", help="G-code to send when a jam/runout is detected (default: M600).")
-    ap.add_argument("--jam-timeout", type=float, default=8.0, help="G-code to send when a jam/runout is detected (default: M600).")
+    ap.add_argument("--jam-timeout", type=float, default=8.0, help="Seconds without motion pulses (after arming) before declaring a jam (default: 8.0).")
     ap.add_argument("--arm-min-pulses", type=int, default=12, help="Minimum motion pulses required before jam detection is armed.")
-    ap.add_argument("--version", action="store_true", help="Minimum motion pulses required before jam detection is armed.")
+    ap.add_argument("--version", action="store_true", help="Print version and exit.")
     return ap
 
 
