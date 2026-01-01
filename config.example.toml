@@ -1,0 +1,38 @@
+# Example configuration for filament-monitor
+#
+# This file is NOT loaded automatically.
+# Use with:  --config /path/to/config.toml
+#
+# Precedence:
+#   CLI arguments > this file > built-in defaults
+
+[serial]
+# Serial device for the printer connection
+port = "/dev/ttyACM0"
+baud = 115200
+
+[gpio]
+# BCM GPIO pin numbers
+motion_gpio = 26
+
+# Enable/disable runout monitoring
+runout_enabled = false
+runout_gpio = 27
+runout_active_high = false
+
+# Optional debounce (seconds); omit or set to null to disable
+runout_debounce = null
+
+[detection]
+# Minimum pulses before jam detection is armed
+arm_min_pulses = 12
+
+# Seconds without motion (after arming) before declaring a jam
+jam_timeout = 8.0
+
+# G-code sent when a jam/runout is detected
+pause_gcode = "M600"
+
+[logging]
+verbose = false
+no_banner = false

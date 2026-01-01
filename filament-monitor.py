@@ -43,6 +43,12 @@ import signal
 import sys
 import threading
 import time
+import json
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover
+    import tomli as tomllib
+
 from dataclasses import dataclass, asdict
 from typing import Optional
 
@@ -376,36 +382,7 @@ def run_doctor(args):
     print("  - Toggle runout to test runout.")
     print("  Ctrl+C to exit.")
     print()
-    # Optional serial echo check (safe): if a port is provided, send a unique M118 token and
-    # look for it to be echoed back. This helps confirm that the printer is reachable and
-    # that M118 A1 messages are visible on the host side.
-    if getattr(args, "port", None):
-        try:
-            ser = serial.Serial(args.port, args.baud, timeout=0.5)
-            token = f"filmon:doctor {int(time.time())}"
-            ser.write(f"M118 A1 {token}\\n".encode())
-            ser.flush()
-            deadline = time.monotonic() + 3.0
-            echoed = False
-            while time.monotonic() < deadline:
-                line = ser.readline().decode(errors="replace").strip()
-                if token.lower() in line.lower():
-                    echoed = True
-                    break
-            if echoed:
-                print("  OK: serial echo seen")
-            else:
-                print("  WARN: no serial echo observed (is M118 echoed to host?)")
-        except Exception as e:
-            print(f"  WARN: serial check failed: {e}")
-        finally:
-            try:
-                ser.close()
-            except Exception:
-                pass
-    else:
-        print("  INFO: no -p/--port provided; skipping serial echo check")
-    print()
+
     motion = DigitalInputDevice(args.motion_gpio, pull_up=True)
     pulse_count = 0
 
@@ -469,7 +446,7 @@ def run_self_test(args):
     motion = DigitalInputDevice(args.motion_gpio, pull_up=True)
     pulse_count = 0
 
-    # Increment the local pulse counter for this diagnostic test.
+    """Increment the local pulse counter for this diagnostic test."""
     def on_pulse():
         """Increment a local pulse counter for this diagnostic test."""
         nonlocal pulse_count
@@ -510,23 +487,81 @@ def run_self_test(args):
     ser.close()
     print("Self-test complete.")
 
-def build_arg_parser():
+
+def load_toml_config(path: str) -> dict:
+    """Load TOML configuration from path."""
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def _get_cfg(cfg: dict, section: str, key: str, default=None):
+    sec = cfg.get(section, {})
+    if not isinstance(sec, dict):
+        return default
+    return sec.get(key, default)
+
+
+def config_defaults_from(cfg: dict) -> dict:
+    """Map TOML config into argparse defaults."""
+    return {
+        "port": _get_cfg(cfg, "serial", "port", None),
+        "baud": _get_cfg(cfg, "serial", "baud", 115200),
+        "motion_gpio": _get_cfg(cfg, "gpio", "motion_gpio", 26),
+        "runout_enabled": _get_cfg(cfg, "gpio", "runout_enabled", False),
+        "runout_gpio": _get_cfg(cfg, "gpio", "runout_gpio", 27),
+        "runout_active_high": _get_cfg(cfg, "gpio", "runout_active_high", False),
+        "runout_debounce": _get_cfg(cfg, "gpio", "runout_debounce", None),
+        "arm_min_pulses": _get_cfg(cfg, "detection", "arm_min_pulses", 12),
+        "jam_timeout": _get_cfg(cfg, "detection", "jam_timeout", 8.0),
+        "pause_gcode": _get_cfg(cfg, "detection", "pause_gcode", "M600"),
+        "verbose": _get_cfg(cfg, "logging", "verbose", False),
+        "no_banner": _get_cfg(cfg, "logging", "no_banner", False),
+    }
+
+
+def resolved_config_dict(args) -> dict:
+    return {
+        "serial": {"port": args.port, "baud": args.baud},
+        "gpio": {
+            "motion_gpio": args.motion_gpio,
+            "runout_enabled": args.runout_enabled,
+            "runout_gpio": args.runout_gpio,
+            "runout_active_high": args.runout_active_high,
+            "runout_debounce": args.runout_debounce,
+        },
+        "detection": {
+            "arm_min_pulses": args.arm_min_pulses,
+            "jam_timeout": args.jam_timeout,
+            "pause_gcode": args.pause_gcode,
+        },
+        "logging": {"verbose": args.verbose, "no_banner": args.no_banner},
+    }
+
+
+def build_arg_parser(defaults=None):
     """Construct the CLI argument parser for the daemon."""
     ap = argparse.ArgumentParser(epilog=USAGE_EXAMPLES, formatter_class=RawDescriptionHelpFormatter)
+    if defaults:
+        ap.set_defaults(**defaults)
     ap.add_argument("-p", "--port", help="Serial device for the printer connection (e.g., /dev/ttyACM0).")
     ap.add_argument("--baud", type=int, default=115200, help="Serial baud rate for the printer connection (default: 115200).")
     ap.add_argument("--motion-gpio", type=int, default=26, help="BCM GPIO pin number for the filament motion pulse input.")
     ap.add_argument("--runout-gpio", type=int, default=27, help="BCM GPIO pin number for the optional runout input.")
-    ap.add_argument("--runout-enabled", action="store_true", default=False, help="Enable runout monitoring (default: disabled).")
+    ap.add_argument("--runout-enabled", dest="runout_enabled", action="store_true", help="Enable runout monitoring (default: disabled).")
+    ap.add_argument("--runout-disabled", dest="runout_enabled", action="store_false", help="Disable runout monitoring.")
     ap.add_argument("--runout-debounce", type=float, default=None, help="Debounce time (seconds) applied to the runout input to ignore short glitches.")
-    ap.add_argument("--verbose", action="store_true", help="Verbose logging (includes serial chatter).")
-    ap.add_argument("--no-banner", action="store_true", help="Disable the startup banner.")
+    ap.add_argument("--verbose", dest="verbose", action="store_true", help="Verbose logging (includes serial chatter).")
+    ap.add_argument("--no-verbose", dest="verbose", action="store_false", help="Disable verbose logging.")
+    ap.add_argument("--no-banner", dest="no_banner", action="store_true", help="Disable the startup banner.")
+    ap.add_argument("--banner", dest="no_banner", action="store_false", help="Enable the startup banner.")
     ap.add_argument("--runout-active-high", action="store_true", default=False, help="Treat the runout signal as active-high (default is active-low).")
-    ap.add_argument("--doctor", action="store_true", help="Run host diagnostics (GPIO, optional serial echo) and exit.")
+    ap.add_argument("--doctor", action="store_true", help="Run host/printer diagnostics (GPIO + serial checks) and exit.")
     ap.add_argument("--self-test", action="store_true", help="Dry-run mode: monitor inputs and parsing but do not send pause commands.")
     ap.add_argument("--pause-gcode", default="M600", help="G-code to send when a jam/runout is detected (default: M600).")
     ap.add_argument("--jam-timeout", type=float, default=8.0, help="Seconds without motion pulses (after arming) before declaring a jam (default: 8.0).")
     ap.add_argument("--arm-min-pulses", type=int, default=12, help="Minimum motion pulses required before jam detection is armed.")
+    ap.add_argument("--config", help="Path to a TOML config file. CLI args override config values.")
+    ap.add_argument("--print-config", action="store_true", help="Print the resolved configuration and exit.")
     ap.add_argument("--version", action="store_true", help="Print version and exit.")
     return ap
 
@@ -568,6 +603,9 @@ def main():
         return 0
 
     args = ap.parse_args()
+    if getattr(args, 'print_config', False):
+        print(json.dumps(resolved_config_dict(args), indent=2, sort_keys=True))
+        return 0
     # Serial (pyserial) is required to connect to the printer.
     if serial is None:  # pragma: no cover
         print("ERROR: pyserial is not installed. Install it with: pip install pyserial", file=sys.stderr)

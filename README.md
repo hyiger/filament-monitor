@@ -195,6 +195,7 @@ The table below is synced to the script’s `argparse` help strings.
 |---------|---------|---------|
 | `--motion-gpio` | BCM GPIO pin number for the filament motion pulse input. | `26` |
 | `--runout-enabled` | Enable runout monitoring (default: disabled). | `False` |
+| `--runout-disabled` | Disable runout monitoring. | `False` |
 | `--runout-gpio` | BCM GPIO pin number for the optional runout input. | `27` |
 | `--runout-debounce` | Debounce time (seconds) applied to the runout input to ignore short glitches. | `` |
 | `--runout-active-high` | Treat the runout signal as active-high (default is active-low). | `False` |
@@ -214,8 +215,12 @@ The table below is synced to the script’s `argparse` help strings.
 | `--doctor` | Run host/printer diagnostics (GPIO + serial checks) and exit. | `False` |
 | `--self-test` | Dry-run mode: monitor inputs and parsing but do not send pause commands. | `False` |
 | `--verbose` | Verbose logging (includes serial chatter). | `False` |
+| `--no-verbose` | Disable verbose logging. | `False` |
 | `--no-banner` | Disable the startup banner. | `False` |
+| `--banner` | Enable the startup banner. | `False` |
 | `--version` | Print version and exit. | `False` |
+| `--config` | Path to a TOML config file (CLI overrides config). | `` |
+| `--print-config` | Print the resolved configuration and exit. | `False` |
 
 Example (motion + optional runout):
 ```bash
@@ -300,6 +305,50 @@ Notes:
 ## Usage
 
 Typical command line:
+
+## Configuration (TOML)
+
+For systemd deployments, a TOML config file keeps `ExecStart` short and makes upgrades safer.
+
+**Precedence:** CLI arguments override TOML values, which override built-in defaults.
+
+Example `config.toml`:
+
+```toml
+[serial]
+port = "/dev/ttyACM0"
+baud = 115200
+
+[gpio]
+motion_gpio = 26
+runout_enabled = true
+runout_gpio = 27
+runout_active_high = true
+runout_debounce = 0.05
+
+[detection]
+arm_min_pulses = 12
+jam_timeout = 8.0
+pause_gcode = "M600"
+
+[logging]
+verbose = false
+no_banner = false
+```
+
+Run using config:
+
+```bash
+python filament-monitor.py --config /etc/filmon/config.toml
+```
+
+Print the resolved configuration:
+
+```bash
+python filament-monitor.py --config /etc/filmon/config.toml --print-config
+```
+
+
 ```bash
 python filament-monitor.py -p /dev/ttyACM0 --motion-gpio 26 --runout-gpio 27 --runout-active-high
 ```
