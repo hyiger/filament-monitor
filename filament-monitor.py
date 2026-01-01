@@ -86,6 +86,8 @@ VERSION = "1.0.4"
 CONTROL_ENABLE  = "filmon:enable"
 CONTROL_DISABLE = "filmon:disable"
 CONTROL_RESET   = "filmon:reset"
+CONTROL_ARM     = "filmon:arm"
+CONTROL_UNARM   = "filmon:unarm"
 
 def now_s() -> float:
     """Return current monotonic time in seconds (float). Used for timeout math."""
@@ -243,15 +245,6 @@ class FilamentMonitor:
         self.state.motion_pulses_since_reset += 1
         self.state.last_pulse_ts = ts
 
-
-        if self.state.enabled and not self.state.armed:
-            if self.state.motion_pulses_since_reset >= self.arm_min_pulses:
-                # Only arm when not latched (or after auto-unlatch above).
-                if not self.state.latched:
-                    self.state.armed = True
-                    self.logger.emit("armed")
-
-
     def _debounced(self) -> bool:
         """Return True if the runout input change passes debounce filtering."""
         ts = now_s()
@@ -312,47 +305,76 @@ class FilamentMonitor:
     def _maybe_jam(self):
         """Evaluate jam condition based on pulse timing and thresholds.
 
-        This is called periodically by the main loop when enabled/armed and not latched."""
+        This is called periodically by the main loop. Jams can only trigger when explicitly armed and not latched."""
         if not self.state.enabled or self.state.latched or not self.state.armed:
             return
         if now_s() - self.state.last_pulse_ts >= self.jam_timeout_s:
             self._trigger_pause("jam")
-
     def _handle_control_marker(self, line):
         """Handle a decoded control marker.
 
+        Markers are the only control plane for arming/pausing decisions. Jam/runout
+        detection is *only* active when explicitly armed via `filmon:arm`.
+
         Supported markers:
-            filmon:enable   - enable monitoring
+            filmon:reset    - clear latch/counters and DISABLE monitoring
+            filmon:enable   - enable monitoring (unarmed)
+            filmon:arm      - enable monitoring and ARM jam/runout detection
+            filmon:unarm    - keep enabled but disarm detection
             filmon:disable  - disable monitoring
-            filmon:reset    - clear latch/arming and counters
         """
         low = line.lower()
-        if CONTROL_ENABLE in low:
-            # Idempotent enable: repeated enable markers must not reset counters or disarm.
-            if self.state.enabled:
-                self.logger.emit("enabled")
-                return
 
-            self.state.enabled = True
-            # Initialize the jam timer reference so we don't immediately jam before any motion is observed.
-            self.state.last_pulse_ts = now_s()
+        # NOTE: reset always wins.
+        if CONTROL_RESET in low:
+            self.state.enabled = False
+            self.state.armed = False
+            self.state.latched = False
+            self.state.runout_asserted = False
             self.state.motion_pulses_since_reset = 0
-            # If configured for 0 pulses, arm immediately (useful for virtual-serial integration tests).
-            if self.arm_min_pulses <= 0:
-                self.state.armed = True
-                self.logger.emit("armed (arm_min_pulses=0)")
-            else:
+            self.state.last_pulse_ts = now_s()
+            self.logger.emit("reset")
+            return
+
+        # Ignore state transitions while latched except disable/reset.
+        if self.state.latched:
+            if CONTROL_DISABLE in low:
+                self.state.enabled = False
                 self.state.armed = False
-            self.logger.emit("enabled")
-        elif CONTROL_DISABLE in low:
+                self.logger.emit("disabled")
+            return
+
+        if CONTROL_DISABLE in low:
             self.state.enabled = False
             self.state.armed = False
             self.logger.emit("disabled")
-        elif CONTROL_RESET in low:
-            self.state.latched = False
+            return
+
+        if CONTROL_UNARM in low:
+            # Idempotent: unarming should not reset counters.
+            self.state.enabled = True
             self.state.armed = False
-            self.state.motion_pulses_since_reset = 0
-            self.logger.emit("reset")
+            self.logger.emit("unarmed")
+            return
+
+        if CONTROL_ARM in low:
+            # Arm implies enabled. Start timeout reference at arm time to avoid an immediate jam.
+            self.state.enabled = True
+            self.state.armed = True
+            self.state.last_pulse_ts = now_s()
+            self.logger.emit("armed")
+            return
+
+        if CONTROL_ENABLE in low:
+            # Enable only; never arms automatically. Idempotent and does not reset counters.
+            if self.state.enabled and not self.state.armed:
+                self.logger.emit("enabled")
+                return
+            self.state.enabled = True
+            self.state.armed = False
+            self.state.last_pulse_ts = now_s()
+            self.logger.emit("enabled")
+            return
 
     def start(self):
         """Start GPIO monitoring and the main loop (and serial reader if configured)."""
