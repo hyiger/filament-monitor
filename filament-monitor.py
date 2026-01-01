@@ -325,7 +325,12 @@ class FilamentMonitor:
         if CONTROL_ENABLE in low:
             self.state.enabled = True
             self.state.motion_pulses_since_reset = 0
-            self.state.armed = False
+            # If configured for 0 pulses, arm immediately (useful for virtual-serial integration tests).
+            if self.arm_min_pulses <= 0:
+                self.state.armed = True
+                self.logger.emit("armed (arm_min_pulses=0)")
+            else:
+                self.state.armed = False
             self.logger.emit("enabled")
         elif CONTROL_DISABLE in low:
             self.state.enabled = False
