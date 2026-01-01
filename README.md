@@ -70,6 +70,25 @@ python filament-monitor.py -p /dev/ttyACM0
 
 ## PrusaSlicer configuration
 
+
+
+### Marker-only arming (recommended)
+
+Jam/runout detection is **marker-driven only** to prevent false positives ("jam storms").
+The monitor will **never** declare a jam or runout unless you explicitly arm it.
+
+Use these markers (sent via `M118 A1 ...`):
+
+- `filmon:reset`  — clears latch/counters and disables monitoring
+- `filmon:enable` — enables monitoring (unarmed; safe during travel/heatup)
+- `filmon:arm`    — enables monitoring and arms jam/runout detection
+- `filmon:unarm`  — keeps enabled but disarms detection
+- `filmon:disable`— disables monitoring
+
+Recommended pattern:
+- In **Start G-code**: `reset`, then `enable`, then `arm` **right before purge/extrusion starts**
+- In **End G-code**: `disable`
+
 Use PrusaSlicer Custom G-code hooks to explicitly control when monitoring is active.
 
 For an overview of the monitor’s internal states and why layer-change gating works, see **How it works → State model** below.
