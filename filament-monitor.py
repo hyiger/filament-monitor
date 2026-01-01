@@ -228,6 +228,10 @@ class FilamentMonitor:
 
         Updates pulse counters and timestamps used to determine whether filament is
         moving when the monitor is enabled."""
+        # Ignore late GPIO callbacks once shutdown begins.
+        if self._stop_evt.is_set():
+            return
+
         ts = now_s()
         self.state.motion_pulses_total += 1
         self.state.motion_pulses_since_reset += 1
@@ -236,11 +240,6 @@ class FilamentMonitor:
 
         if self.state.enabled and not self.state.armed:
             if self.state.motion_pulses_since_reset >= self.arm_min_pulses:
-                # If we are coming back from a prior pause (latched), allow a new event
-                # after credible motion resumes.
-                if self.state.latched and (time.time() - self.state.pause_sent_ts) > 2.0:
-                    self.state.latched = False
-                    self.logger.emit("auto_unlatched")
                 # Only arm when not latched (or after auto-unlatch above).
                 if not self.state.latched:
                     self.state.armed = True
@@ -323,7 +322,14 @@ class FilamentMonitor:
         """
         low = line.lower()
         if CONTROL_ENABLE in low:
+            # Idempotent enable: repeated enable markers must not reset counters or disarm.
+            if self.state.enabled:
+                self.logger.emit("enabled")
+                return
+
             self.state.enabled = True
+            # Initialize the jam timer reference so we don't immediately jam before any motion is observed.
+            self.state.last_pulse_ts = now_s()
             self.state.motion_pulses_since_reset = 0
             # If configured for 0 pulses, arm immediately (useful for virtual-serial integration tests).
             if self.arm_min_pulses <= 0:

@@ -86,9 +86,16 @@ M118 A1 filmon:disable
 ```
 
 ### Before and after layer change
-If your firmware does not echo positive extrusion (`E > 0`) to the serial console, the monitor cannot infer when extrusion is *expected*. To avoid false jam detections during layer-change travel/Z moves, gate monitoring per layer:
+If your firmware does not echo positive extrusion (`E > 0`) to the serial console, the monitor cannot infer when extrusion is *expected*.
+To avoid false jam detections during layer-change travel/Z moves, gate monitoring per layer:
 
-**Before layer change G-code**
+- Disable monitoring before layer change (travel / Z lift / wipe / dwell).
+- Re-enable monitoring **only once the printer is about to extrude**.
+
+If you only have PrusaSlicer’s `AFTER_LAYER_CHANGE` hook, this still works **provided the monitor stays UNARMED until motion pulses are observed**
+(or until extrusion is explicitly detected). If you see false jams immediately after `filmon:enable`, move the enable later (e.g. a hook right before
+perimeters/infill) or increase the jam timeout.
+
 ```gcode
 ;BEFORE_LAYER_CHANGE
 M118 A1 filmon:disable
@@ -363,3 +370,43 @@ DD_TRACE_ENABLED=false pytest
 
 This does not affect normal operation of `filament-monitor`.
 
+---
+
+## Design Philosophy (Jam-Resistant Operation)
+
+This monitor is intentionally conservative:
+
+- False positives are considered worse than delayed detection
+- Monitoring must be explicitly enabled via slicer or G-code markers
+- Motion expectation is derived from *actual commanded extrusion*
+- Jam detection requires multiple invariants to be violated simultaneously
+
+The goal is predictable, reviewable behavior rather than aggressive detection.
+
+---
+
+## Safety Invariants
+
+The following invariants are enforced by both runtime logic and unit tests:
+
+- Jam timers do **not** start until valid filament motion has been observed
+- `filmon:disable` or `filmon:reset` immediately cancels all active timers
+- Duplicate enable/disable markers are idempotent
+- GPIO callbacks are ignored once shutdown begins
+- A triggered pause blocks further detection until reset
+
+If any invariant cannot be satisfied, the monitor fails safe.
+
+---
+
+## Pause Latch Behavior
+
+When a jam or runout is detected:
+
+1. A single pause command (default: `M600`) is issued
+2. The monitor enters a **latched** state
+3. No additional pause commands are sent
+4. Jam detection remains disabled until `filmon:reset`
+
+This latch is explicitly tested to prevent repeated pause commands
+(“jam storms”) during recovery or user intervention.
