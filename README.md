@@ -305,15 +305,24 @@ Notes:
 ## Usage
 
 Typical command line:
+```bash
+python filament-monitor.py -p /dev/ttyACM0 --motion-gpio 26 --runout-gpio 27 --runout-active-high
+```
+
+For help:
+```bash
+python filament-monitor.py -h
+```
+
 
 ## Configuration (TOML)
 
 For systemd deployments, a TOML config file keeps `ExecStart` short and makes upgrades safer.
 
-**Precedence:** CLI arguments override TOML values, which override built-in defaults.
+**Precedence:**  
+CLI arguments override TOML values, which override built-in defaults.
 
-Example `config.toml`:
-
+### Example `config.toml`
 ```toml
 [serial]
 port = "/dev/ttyACM0"
@@ -337,25 +346,13 @@ no_banner = false
 ```
 
 Run using config:
-
 ```bash
 python filament-monitor.py --config /etc/filmon/config.toml
 ```
 
 Print the resolved configuration:
-
 ```bash
 python filament-monitor.py --config /etc/filmon/config.toml --print-config
-```
-
-
-```bash
-python filament-monitor.py -p /dev/ttyACM0 --motion-gpio 26 --runout-gpio 27 --runout-active-high
-```
-
-For help:
-```bash
-python filament-monitor.py -h
 ```
 
 ## Systemd service
