@@ -109,7 +109,8 @@ def test_latch_blocks_retrigger_until_reset(monkeypatch):
     mon._handle_control_marker("filmon:arm")
     t["now"] += 2.0
     mon._maybe_jam()
-    assert len(mon._ser.writes) == len(writes1) + 1
+    # Each trigger sends M400 then pause_gcode (2 writes)
+    assert len(mon._ser.writes) == len(writes1) + 2
 
 
 def test_runout_requires_arm(monkeypatch):

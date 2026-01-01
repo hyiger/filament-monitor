@@ -233,6 +233,8 @@ The table below is synced to the script’s `argparse` help strings.
 | `--doctor` | Run host/printer diagnostics (GPIO + serial checks) and exit. | `False` |
 | `--self-test` | Dry-run mode: monitor inputs and parsing but do not send pause commands. | `False` |
 | `--verbose` | Verbose logging (includes serial chatter). | `False` |
+| `--json` | Emit structured JSON log events (one per line). | `False` |
+| `--no-json` | Disable JSON log output. | `False` |
 | `--no-banner` | Disable the startup banner. | `False` |
 | `--version` | Print version and exit. | `False` |
 | `--config` | Path to a TOML config file (CLI overrides config). | `` |

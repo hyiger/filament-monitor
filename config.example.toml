@@ -36,3 +36,7 @@ pause_gcode = "M600"
 [logging]
 verbose = false
 no_banner = false
+json = false
+breadcrumb_interval = 2.0
+pulse_window = 2.0
+stall_thresholds = "2,4"
