@@ -337,7 +337,18 @@ journalctl -u filament-monitor.service -f
 - If serial control markers are not observed, confirm the printer echoes `M118` messages to the console.
 
 
-## Unit tests
+\1
+#### Integration tests (virtual serial)
+
+Integration tests are marked with `@pytest.mark.integration` and are **not** run by default.
+
+Run them locally:
+
+```bash
+DD_TRACE_ENABLED=false pytest -q -m integration
+```
+
+On GitHub Actions, integration tests run via the manual workflow (**Actions → integration → Run workflow**).
 
 ### Running unit tests
 
