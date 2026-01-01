@@ -39,3 +39,27 @@ def test_runout_guardrails_respected_when_enabled():
     assert args.runout_gpio == 22
     assert args.runout_debounce == 0.15
     assert args.runout_active_high is True
+
+
+def test_config_provides_port_without_cli_port(tmp_path):
+    """Regression: --config should satisfy the normal-mode port requirement."""
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "filament-monitor.py"
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('[serial]\nport = "/dev/ttyACM0"\nbaud = 115200\n', encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(script), "--config", str(cfg), "--print-config"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["serial"]["port"] == "/dev/ttyACM0"
