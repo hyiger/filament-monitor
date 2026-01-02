@@ -24,7 +24,7 @@ runout_active_high = false
 # runout_debounce = 0.05  # seconds (optional)
 
 [detection]
-# Minimum pulses before jam detection is armed
+# (Legacy/unused) Jam detection is marker-driven via filmon:arm.
 arm_min_pulses = 12
 
 # Seconds without motion (after arming) before declaring a jam
@@ -36,3 +36,7 @@ pause_gcode = "M600"
 [logging]
 verbose = false
 no_banner = false
+json = false
+breadcrumb_interval = 2.0
+pulse_window = 2.0
+stall_thresholds = "3,6"

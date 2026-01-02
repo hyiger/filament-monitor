@@ -24,8 +24,8 @@ Usage examples:
   # Motion + runout inputs (BCM numbering)
   python filament-monitor.py -p /dev/ttyACM0 --motion-gpio 26 --runout-gpio 27 --runout-enabled --runout-active-high
 
-  # Conservative jam tuning
-  python filament-monitor.py -p /dev/ttyACM0 --arm-min-pulses 12 --jam-timeout-s 8.0
+  # Conservative jam tuning (marker-driven arming)
+  python filament-monitor.py -p /dev/ttyACM0 --jam-timeout 8 --stall-thresholds 3,6 --verbose --json
 
   # Safe dry-run (does not send pause commands)
   python filament-monitor.py --self-test -p /dev/ttyACM0
@@ -37,6 +37,7 @@ Usage examples:
 from argparse import RawDescriptionHelpFormatter
 import argparse
 import json
+import collections
 import os
 import queue
 import signal
@@ -111,6 +112,9 @@ class MonitorState:
     motion_pulses_since_reset: int = 0
     last_pulse_ts: float = 0.0
 
+    motion_pulses_since_arm: int = 0
+    arm_ts: float = 0.0
+
     runout_asserted: bool = False
     serial_connected: bool = False
     serial_port: str = ""
@@ -131,11 +135,16 @@ class JsonLogger:
 
     def emit(self, event: str, **fields):
         """Emit a JSON event with a name and optional key/value fields."""
-        payload = {"ts": time.time(), "event": event, **fields}
+        t = time.time()
+        # ts: float seconds since epoch (sub-second resolution). ts_iso is a human-friendly local timestamp with milliseconds.
+        ts_iso = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t)) + f'.{int((t - int(t))*1000):03d}'
+        payload = {"ts": t, "ts_iso": ts_iso, "event": event, **fields}
         if self.enable_json:
             print(json.dumps(payload, sort_keys=True), flush=True)
         else:
-            msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {event}"
+            t = time.time()
+            ms = int((t - int(t)) * 1000)
+            msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))}.{ms:03d}] {event}"
             if fields:
                 msg += " " + " ".join(f"{k}={v}" for k, v in fields.items())
             print(msg, flush=True)
@@ -194,6 +203,9 @@ class FilamentMonitor:
         arm_min_pulses: int,
         pause_gcode: str,
         verbose: bool = False,
+        breadcrumb_interval_s: float = 2.0,
+        pulse_window_s: float = 2.0,
+        stall_thresholds_s: Optional[str] = "3,6",
     ):
         """
         Initialize the monitor.
@@ -205,6 +217,20 @@ class FilamentMonitor:
         self.logger = logger
         self.verbose = bool(verbose)
 
+        
+        # Pulse breadcrumb / rate tracking
+        self._pulse_times = collections.deque()  # monotonic timestamps of recent pulses
+        self._pulse_window_s = float(pulse_window_s)
+        self._breadcrumb_interval_s = float(breadcrumb_interval_s)
+        # thresholds (seconds since last pulse) at which we emit 'stall' breadcrumbs while armed
+        self._stall_thresholds_s = []
+        try:
+            if stall_thresholds_s:
+                self._stall_thresholds_s = sorted({float(x.strip()) for x in str(stall_thresholds_s).split(",") if x.strip()})
+        except Exception:
+            self._stall_thresholds_s = [3.0, 6.0]
+        self._stall_next_idx = 0
+        self._next_hb_ts = now_s() + self._breadcrumb_interval_s
         self.jam_timeout_s = jam_timeout_s
         self.arm_min_pulses = arm_min_pulses
         self.pause_gcode = pause_gcode.strip()
@@ -241,9 +267,85 @@ class FilamentMonitor:
             return
 
         ts = now_s()
+        # Track recent pulses for pps breadcrumbs.
+        self._pulse_times.append(ts)
+        self._prune_pulses(ts)
+
         self.state.motion_pulses_total += 1
         self.state.motion_pulses_since_reset += 1
+
+        # Per-arm pulse counter + first-pulse breadcrumb
+        if self.state.armed:
+            if self.state.motion_pulses_since_arm == 0 and self.state.arm_ts:
+                self.logger.emit("first_pulse_after_arm", dt=round(ts - self.state.arm_ts, 3))
+            self.state.motion_pulses_since_arm += 1
+
         self.state.last_pulse_ts = ts
+        # New pulse resets stall breadcrumb progression.
+        self._stall_next_idx = 0
+
+
+
+    def _prune_pulses(self, now: float):
+        """Drop pulse timestamps older than the configured window."""
+        if self._pulse_window_s <= 0:
+            self._pulse_times.clear()
+            return
+        cutoff = now - self._pulse_window_s
+        while self._pulse_times and self._pulse_times[0] < cutoff:
+            self._pulse_times.popleft()
+
+    def _pps(self, now: float) -> float:
+        """Return pulses-per-second over the recent window."""
+        self._prune_pulses(now)
+        if self._pulse_window_s <= 0:
+            return 0.0
+        return float(len(self._pulse_times)) / float(self._pulse_window_s)
+
+    def _reset_pulse_tracking(self):
+        """Reset pulse-rate tracking and stall breadcrumb state."""
+        self._pulse_times.clear()
+        self._stall_next_idx = 0
+        self._next_hb_ts = now_s() + self._breadcrumb_interval_s
+
+    def _maybe_breadcrumbs(self):
+        """Emit low-volume 'heartbeat' and 'stall' breadcrumbs for debugging/tuning."""
+        now = now_s()
+
+        # Heartbeat snapshot (enabled only, to avoid noise when fully off)
+        if self._breadcrumb_interval_s > 0 and self.state.enabled and now >= self._next_hb_ts:
+            dt = now - self.state.last_pulse_ts if self.state.last_pulse_ts else None
+            self.logger.emit(
+                "hb",
+                enabled=int(self.state.enabled),
+                armed=int(self.state.armed),
+                latched=int(self.state.latched),
+                runout=int(self.state.runout_asserted),
+                dt_since_pulse=(round(dt, 3) if dt is not None else None),
+                pps=round(self._pps(now), 3),
+                pulses_reset=self.state.motion_pulses_since_reset,
+                pulses_arm=self.state.motion_pulses_since_arm,
+            )
+            self._next_hb_ts = now + self._breadcrumb_interval_s
+
+        # Stall breadcrumbs: only while detection is active
+        if not (self.state.enabled and self.state.armed) or self.state.latched:
+            return
+
+        if not self._stall_thresholds_s:
+            return
+
+        dt = now - self.state.last_pulse_ts
+        while self._stall_next_idx < len(self._stall_thresholds_s) and dt >= self._stall_thresholds_s[self._stall_next_idx]:
+            thr = self._stall_thresholds_s[self._stall_next_idx]
+            self.logger.emit(
+                "stall",
+                dt_since_pulse=round(dt, 3),
+                threshold_s=thr,
+                pps=round(self._pps(now), 3),
+                pulses_arm=self.state.motion_pulses_since_arm,
+            )
+            self._stall_next_idx += 1
 
     def _debounced(self) -> bool:
         """Return True if the runout input change passes debounce filtering."""
@@ -299,7 +401,18 @@ class FilamentMonitor:
         self.state.pause_sent_ts = time.time()
         self.state.last_trigger = reason
         self.state.last_trigger_ts = time.time()
-        self.logger.emit("pause_triggered", reason=reason)
+        now = now_s()
+        dt = (now - self.state.last_pulse_ts) if self.state.last_pulse_ts else None
+        self.logger.emit(
+            "pause_triggered",
+            reason=reason,
+            dt_since_pulse=(round(dt, 3) if dt is not None else None),
+            pps=round(self._pps(now), 3),
+            pulses_reset=self.state.motion_pulses_since_reset,
+            pulses_arm=self.state.motion_pulses_since_arm,
+        )
+        # Ensure the planner is drained before pausing.
+        self._send_gcode("M400")
         self._send_gcode(self.pause_gcode)
 
     def _maybe_jam(self):
@@ -333,6 +446,9 @@ class FilamentMonitor:
             self.state.runout_asserted = False
             self.state.motion_pulses_since_reset = 0
             self.state.last_pulse_ts = now_s()
+            self.state.motion_pulses_since_arm = 0
+            self.state.arm_ts = 0.0
+            self._reset_pulse_tracking()
             self.logger.emit("reset")
             return
 
@@ -354,6 +470,7 @@ class FilamentMonitor:
             # Idempotent: unarming should not reset counters.
             self.state.enabled = True
             self.state.armed = False
+            self._stall_next_idx = 0
             self.logger.emit("unarmed")
             return
 
@@ -361,7 +478,10 @@ class FilamentMonitor:
             # Arm implies enabled. Start timeout reference at arm time to avoid an immediate jam.
             self.state.enabled = True
             self.state.armed = True
-            self.state.last_pulse_ts = now_s()
+            self.state.motion_pulses_since_arm = 0
+            self.state.arm_ts = now_s()
+            self.state.last_pulse_ts = self.state.arm_ts
+            self._stall_next_idx = 0
             self.logger.emit("armed")
             return
 
@@ -373,6 +493,7 @@ class FilamentMonitor:
             self.state.enabled = True
             self.state.armed = False
             self.state.last_pulse_ts = now_s()
+            self._stall_next_idx = 0
             self.logger.emit("enabled")
             return
 
@@ -385,7 +506,7 @@ class FilamentMonitor:
         self._stop_evt.set()
 
     def _loop(self):
-        """Main periodic loop. Arms on sufficient pulses and checks for jam/runout faults."""
+        """Main periodic loop. Processes control markers and checks for jam/runout faults."""
         while not self._stop_evt.is_set():
             try:
                 line = self._serial_q.get(timeout=0.2)
@@ -395,6 +516,7 @@ class FilamentMonitor:
             except queue.Empty:
                 pass
             self._maybe_jam()
+            self._maybe_breadcrumbs()
 
 def run_doctor(args):
     """Run environment checks (serial access, GPIO availability) and print diagnostics."""
@@ -538,6 +660,10 @@ def config_defaults_from(cfg: dict) -> dict:
         "pause_gcode": _get_cfg(cfg, "detection", "pause_gcode", "M600"),
         "verbose": _get_cfg(cfg, "logging", "verbose", False),
         "no_banner": _get_cfg(cfg, "logging", "no_banner", False),
+        "json": _get_cfg(cfg, "logging", "json", False),
+        "breadcrumb_interval": _get_cfg(cfg, "logging", "breadcrumb_interval", 2.0),
+        "pulse_window": _get_cfg(cfg, "logging", "pulse_window", 2.0),
+        "stall_thresholds": _get_cfg(cfg, "logging", "stall_thresholds", "3,6"),
     }
 
 
@@ -556,32 +682,50 @@ def resolved_config_dict(args) -> dict:
             "jam_timeout": args.jam_timeout,
             "pause_gcode": args.pause_gcode,
         },
-        "logging": {"verbose": args.verbose, "no_banner": args.no_banner},
+        "logging": {
+            "verbose": args.verbose,
+            "no_banner": args.no_banner,
+            "breadcrumb_interval": args.breadcrumb_interval,
+            "pulse_window": args.pulse_window,
+            "stall_thresholds": args.stall_thresholds,
+            "json": bool(args.json),
+        },
     }
 
 
 def build_arg_parser(defaults=None):
     """Construct the CLI argument parser for the daemon."""
     ap = argparse.ArgumentParser(epilog=USAGE_EXAMPLES, formatter_class=RawDescriptionHelpFormatter)
-    if defaults:
-        ap.set_defaults(**defaults)
+    # Defaults are sourced from the built-in defaults, and optionally overridden by TOML config
+    # (we backfill unset CLI args after parsing).
+    if defaults is None:
+        defaults = config_defaults_from({})
+    ap.set_defaults(**defaults)
     ap.add_argument("-p", "--port", help="Serial device for the printer connection (e.g., /dev/ttyACM0).")
-    ap.add_argument("--baud", type=int, default=115200, help="Serial baud rate for the printer connection (default: 115200).")
-    ap.add_argument("--motion-gpio", type=int, default=26, help="BCM GPIO pin number for the filament motion pulse input.")
-    ap.add_argument("--runout-gpio", type=int, default=27, help="BCM GPIO pin number for the optional runout input.")
+    ap.add_argument("--baud", type=int, help="Serial baud rate for the printer connection.")
+    ap.add_argument("--motion-gpio", type=int, help="BCM GPIO pin number for the filament motion pulse input.")
+    ap.add_argument("--runout-gpio", type=int, help="BCM GPIO pin number for the optional runout input.")
     ap.add_argument("--runout-enabled", dest="runout_enabled", action="store_true", help="Enable runout monitoring (default: disabled).")
     ap.add_argument("--runout-disabled", dest="runout_enabled", action="store_false", help="Disable runout monitoring.")
-    ap.add_argument("--runout-debounce", type=float, default=None, help="Debounce time (seconds) applied to the runout input to ignore short glitches.")
+    ap.add_argument("--runout-debounce", type=float, help="Debounce time (seconds) applied to the runout input to ignore short glitches.")
     ap.add_argument("--verbose", dest="verbose", action="store_true", help="Verbose logging (includes serial chatter).")
     ap.add_argument("--no-verbose", dest="verbose", action="store_false", help="Disable verbose logging.")
+    json_group = ap.add_mutually_exclusive_group()
+    json_group.add_argument("--json", dest="json", action="store_true", help="Emit JSON log events.")
+    json_group.add_argument("--no-json", dest="json", action="store_false", help="Disable JSON log output.")
     ap.add_argument("--no-banner", dest="no_banner", action="store_true", help="Disable the startup banner.")
     ap.add_argument("--banner", dest="no_banner", action="store_false", help="Enable the startup banner.")
-    ap.add_argument("--runout-active-high", action="store_true", default=False, help="Treat the runout signal as active-high (default is active-low).")
+    ap.add_argument("--runout-active-high", action="store_true", help="Treat the runout signal as active-high.")
     ap.add_argument("--doctor", action="store_true", help="Run host/printer diagnostics (GPIO + serial checks) and exit.")
     ap.add_argument("--self-test", action="store_true", help="Dry-run mode: monitor inputs and parsing but do not send pause commands.")
-    ap.add_argument("--pause-gcode", default="M600", help="G-code to send when a jam/runout is detected (default: M600).")
-    ap.add_argument("--jam-timeout", type=float, default=8.0, help="Seconds without motion pulses (after arming) before declaring a jam (default: 8.0).")
-    ap.add_argument("--arm-min-pulses", type=int, default=12, help="Minimum motion pulses required before jam detection is armed.")
+    ap.add_argument("--pause-gcode", help="G-code to send when a jam/runout is detected.")
+    ap.add_argument("--jam-timeout", type=float, help="Seconds without motion pulses (after arming) before declaring a jam.")
+    ap.add_argument("--arm-min-pulses", type=int, help="(Legacy/unused) Jam detection is marker-driven via filmon:arm.")
+    ap.add_argument("--breadcrumb-interval", type=float,
+                    help="Emit a low-volume heartbeat log every N seconds while enabled. Set 0 to disable.")
+    ap.add_argument("--pulse-window", type=float,
+                    help="Window (seconds) used to compute pulses-per-second (pps) for breadcrumbs.")
+    ap.add_argument("--stall-thresholds", help="Comma-separated seconds-since-last-pulse thresholds for 'stall' breadcrumbs while armed.")
     ap.add_argument("--config", help="Path to a TOML config file. CLI args override config values.")
     ap.add_argument("--print-config", action="store_true", help="Print the resolved configuration and exit.")
     ap.add_argument("--version", action="store_true", help="Print version and exit.")
@@ -688,7 +832,7 @@ def main():
 
     ser = serial.Serial(args.port, args.baud, timeout=0.25)
     state = MonitorState(serial_connected=True, serial_port=args.port, baud=args.baud)
-    logger = JsonLogger(enable_json=False)
+    logger = JsonLogger(enable_json=bool(getattr(args, "json", False)))
     mon = FilamentMonitor(
         state=state,
         logger=logger,
@@ -700,6 +844,9 @@ def main():
         arm_min_pulses=args.arm_min_pulses,
         pause_gcode=args.pause_gcode,
         verbose=args.verbose,
+        breadcrumb_interval_s=args.breadcrumb_interval,
+        pulse_window_s=args.pulse_window,
+        stall_thresholds_s=args.stall_thresholds,
     )
 
     if not args.no_banner:
