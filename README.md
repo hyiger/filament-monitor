@@ -555,6 +555,36 @@ M118 A1 filmon:disable
 
 Do **not** arm during the first layer or during known ultra-low-flow features.
 
+## Re-arming After a Pause (No Console Required)
+
+When the monitor triggers a pause, it **latches** to prevent repeated `M600` commands. After you clear the jam/runout and are about to resume the print, you must **clear the latch and re-arm** to detect subsequent faults.
+
+The daemon owns the printer serial port, so a second console typically cannot connect. Use the **local control socket** instead.
+
+### filmonctl
+
+The project includes `filmonctl.py`, a local UNIX-socket client. Default socket path: `/run/filmon/filmon.sock`.
+
+Re-arm detection after clearing a jam:
+
+```bash
+python filmonctl.py rearm
+```
+
+Inspect state:
+
+```bash
+python filmonctl.py status
+```
+
+Disable the control socket (if desired):
+
+```bash
+python filament-monitor.py ... --no-control-socket
+```
+
+The socket path can be overridden with `--control-socket` (daemon) and `--socket` or `FILMON_SOCKET` (client).
+
 ## Sensor Resolution and Limitations
 
 Motion-based jam detection is constrained by sensor resolution.
@@ -582,3 +612,26 @@ The following defaults are chosen to balance detection latency and false-positiv
 
 These values are validated for typical PLA printing with a 0.4 mm nozzle and normal perimeter/infill speeds. Adjust only after reviewing breadcrumb data.
 
+If the daemon owns the printer serial port, you can re-arm after clearing a jam using a physical button wired to a Raspberry Pi GPIO.
+
+- `--rearm-button-gpio BCM_PIN` (example: `25`)
+- `--rearm-button-active-high` (default) or `--rearm-button-active-low`
+- `--rearm-button-debounce SECONDS` (default: `0.25`)
+
+The button triggers the same action as `filmonctl rearm`: clears the latch, resets counters, and arms detection.
+
+
+
+### Physical rearm button (active-low)
+- Wire the button between **GPIO 25 and GND**
+- The input uses an internal pull-up
+- Pressing the button pulls the pin low and triggers a rearm
+- Debounce is handled in software
+
+Configuration:
+```toml
+[gpio]
+rearm_button_gpio = 25
+rearm_button_active_high = false
+rearm_button_debounce = 0.25
+```

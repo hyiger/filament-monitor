@@ -5,10 +5,14 @@ After=network.target
 [Service]
 Type=simple
 
+# Provide a writable /run/filmon/ directory for the local control socket.
+RuntimeDirectory=filmon
+RuntimeDirectoryMode=0755
+
 # Edit these paths/arguments for your installation.
 # Recommended: create a venv in the project directory and reference its python.
 WorkingDirectory=/opt/filament-monitor
-ExecStart=/opt/filament-monitor/.venv/bin/python /opt/filament-monitor/filament-monitor.py -p /dev/ttyACM0
+ExecStart=/opt/filament-monitor/.venv/bin/python /opt/filament-monitor/filament-monitor.py -p /dev/ttyACM0 --control-socket /run/filmon/filmon.sock
 
 Restart=on-failure
 RestartSec=2

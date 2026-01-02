@@ -45,6 +45,7 @@ import sys
 import threading
 import time
 import json
+import socket
 try:
     import tomllib  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover
@@ -206,6 +207,9 @@ class FilamentMonitor:
         breadcrumb_interval_s: float = 2.0,
         pulse_window_s: float = 2.0,
         stall_thresholds_s: Optional[str] = "3,6",
+        rearm_button_gpio: Optional[int] = None,
+        rearm_button_active_high: bool = False,
+        rearm_button_debounce_s: float = 0.25,
     ):
         """
         Initialize the monitor.
@@ -252,10 +256,41 @@ class FilamentMonitor:
                 self.runout.when_deactivated = self._on_runout_asserted
                 self.runout.when_activated   = self._on_runout_cleared
 
+
+        # Optional physical "rearm" button. Lets you re-arm without sharing the
+        # printer serial port (useful when this daemon owns /dev/ttyACM0).
+        self.rearm_button = None
+        self.rearm_button_active_high = rearm_button_active_high
+        self.rearm_button_debounce_s = rearm_button_debounce_s
+        self._last_rearm_edge = 0.0
+
+
+        if rearm_button_gpio is not None:
+            # Active-low rearm button: GPIO pulled up, press shorts to GND.
+            self.rearm_button = DigitalInputDevice(rearm_button_gpio, pull_up=True)
+            self.rearm_button.when_deactivated = self._on_rearm_button
+
+
         self._ser = None
+        self._ser_lock = threading.Lock()
         self._stop_evt = threading.Event()
         self._serial_q = queue.Queue()
         self._serial_thread = None
+
+        # Optional local control socket (lets you re-arm without sharing the printer serial port)
+        self._control_thread = None
+        self._control_stop_evt = threading.Event()
+        self._control_sock_path: Optional[str] = None
+
+    
+    def _on_rearm_button(self):
+        """Handle a physical rearm button press with debounce."""
+        now = now_s()
+        if (now - self._last_rearm_edge) < self.rearm_button_debounce_s:
+            return
+        self._last_rearm_edge = now
+        # Rearm is idempotent; safe to call even if not currently latched.
+        self._cmd_rearm()
 
     def _on_motion_pulse(self):
         """GPIO callback for filament-motion pulses.
@@ -385,10 +420,164 @@ class FilamentMonitor:
         t.start()
         self._serial_thread = t
 
+    # ---------------- Local control socket ----------------
+    # The monitor holds the printer serial port, so external consoles cannot
+    # concurrently send G-code. A local UNIX socket provides a safe control plane
+    # (e.g. "rearm" after a jam) without serial-port sharing.
+
+    def start_control_socket(self, sock_path: str):
+        """Start a local control socket.
+
+        The socket accepts single-line commands and returns a single-line JSON response.
+        Supported commands: status, rearm, reset, enable, arm, unarm, disable.
+        """
+        if not sock_path:
+            return
+        self._control_sock_path = sock_path
+        t = threading.Thread(target=self._control_loop, daemon=True)
+        t.start()
+        self._control_thread = t
+        self.logger.emit("control_socket_started", path=sock_path)
+
+    def _control_loop(self):
+        path = self._control_sock_path
+        if not path:
+            return
+
+        # Ensure parent directory exists (useful with RuntimeDirectory=/run/filmon)
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        except Exception:
+            pass
+
+        # Ensure any stale socket is removed.
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            srv.bind(path)
+            # Restrict to local users. systemd can further manage permissions via RuntimeDirectory.
+            try:
+                os.chmod(path, 0o660)
+            except Exception:
+                pass
+            srv.listen(4)
+            srv.settimeout(0.5)
+        except Exception as e:
+            try:
+                self.logger.emit("control_socket_error", error=str(e), path=path)
+            except Exception:
+                pass
+            try:
+                srv.close()
+            except Exception:
+                pass
+            return
+
+        while not self._stop_evt.is_set() and not self._control_stop_evt.is_set():
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+
+            try:
+                conn.settimeout(2.0)
+                data = b""
+                while b"\n" not in data and len(data) < 4096:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                cmd = data.decode("utf-8", errors="replace").strip()
+                resp = self._handle_control_command(cmd)
+                conn.sendall((json.dumps(resp, sort_keys=True) + "\n").encode("utf-8"))
+            except Exception as e:
+                try:
+                    conn.sendall((json.dumps({"ok": False, "error": str(e)}) + "\n").encode("utf-8"))
+                except Exception:
+                    pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        try:
+            srv.close()
+        except Exception:
+            pass
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+
+    def _handle_control_command(self, cmd: str) -> dict:
+        cmd = (cmd or "").strip().lower()
+        if not cmd:
+            return {"ok": False, "error": "empty command"}
+
+        if cmd in ("status", "state"):
+            return {"ok": True, "state": asdict(self.state), "version": VERSION}
+
+        if cmd == "rearm":
+            self._cmd_rearm()
+            return {"ok": True}
+
+        # Map simple state transitions to the same semantics as serial markers.
+        if cmd == "reset":
+            self._handle_control_marker(CONTROL_RESET)
+            return {"ok": True}
+        if cmd == "enable":
+            self._handle_control_marker(CONTROL_ENABLE)
+            return {"ok": True}
+        if cmd == "arm":
+            self._handle_control_marker(CONTROL_ARM)
+            return {"ok": True}
+        if cmd == "unarm":
+            self._handle_control_marker(CONTROL_UNARM)
+            return {"ok": True}
+        if cmd == "disable":
+            self._handle_control_marker(CONTROL_DISABLE)
+            return {"ok": True}
+
+        return {"ok": False, "error": f"unknown command: {cmd}"}
+
+    def _cmd_rearm(self):
+        """Clear a latched pause and re-arm detection.
+
+        Intended to be used after the operator clears a jam and is about to resume
+        the print. This does not require a second serial connection.
+        """
+        # Clear latch and counters, then arm with a fresh timeout reference.
+        self.state.latched = False
+        self.state.runout_asserted = False
+        self.state.motion_pulses_since_reset = 0
+        self.state.motion_pulses_since_arm = 0
+        now = now_s()
+        self.state.arm_ts = now
+        self.state.last_pulse_ts = now
+        self._reset_pulse_tracking()
+        self._stall_next_idx = 0
+        self.state.enabled = True
+        self.state.armed = True
+        self.logger.emit("rearmed")
+
     def _send_gcode(self, gcode):
         """Send a single G-code line over serial (adds newline and flushes)."""
-        self._ser.write((gcode + "\n").encode())
-        self._ser.flush()
+        # Serial can be written from the main loop and GPIO callbacks.
+        # Keep writes atomic to avoid interleaving lines.
+        with self._ser_lock:
+            self._ser.write((gcode + "\n").encode())
+            self._ser.flush()
         self.logger.emit("gcode_sent", gcode=gcode)
 
     def _trigger_pause(self, reason):
@@ -504,6 +693,7 @@ class FilamentMonitor:
     def stop(self):
         """Stop threads and clean up GPIO/serial resources."""
         self._stop_evt.set()
+        self._control_stop_evt.set()
 
     def _loop(self):
         """Main periodic loop. Processes control markers and checks for jam/runout faults."""
@@ -655,6 +845,9 @@ def config_defaults_from(cfg: dict) -> dict:
         "runout_gpio": _get_cfg(cfg, "gpio", "runout_gpio", 27),
         "runout_active_high": _get_cfg(cfg, "gpio", "runout_active_high", False),
         "runout_debounce": _get_cfg(cfg, "gpio", "runout_debounce", None),
+        "rearm_button_gpio": _get_cfg(cfg, "gpio", "rearm_button_gpio", None),
+        "rearm_button_active_high": _get_cfg(cfg, "gpio", "rearm_button_active_high", True),
+        "rearm_button_debounce": _get_cfg(cfg, "gpio", "rearm_button_debounce", 0.25),
         "arm_min_pulses": _get_cfg(cfg, "detection", "arm_min_pulses", 12),
         "jam_timeout": _get_cfg(cfg, "detection", "jam_timeout", 8.0),
         "pause_gcode": _get_cfg(cfg, "detection", "pause_gcode", "M600"),
@@ -664,6 +857,7 @@ def config_defaults_from(cfg: dict) -> dict:
         "breadcrumb_interval": _get_cfg(cfg, "logging", "breadcrumb_interval", 2.0),
         "pulse_window": _get_cfg(cfg, "logging", "pulse_window", 2.0),
         "stall_thresholds": _get_cfg(cfg, "logging", "stall_thresholds", "3,6"),
+        "control_socket": _get_cfg(cfg, "control", "socket", "/run/filmon/filmon.sock"),
     }
 
 
@@ -690,6 +884,9 @@ def resolved_config_dict(args) -> dict:
             "stall_thresholds": args.stall_thresholds,
             "json": bool(args.json),
         },
+        "control": {
+            "socket": getattr(args, "control_socket", None),
+        },
     }
 
 
@@ -708,6 +905,12 @@ def build_arg_parser(defaults=None):
     ap.add_argument("--runout-enabled", dest="runout_enabled", action="store_true", help="Enable runout monitoring (default: disabled).")
     ap.add_argument("--runout-disabled", dest="runout_enabled", action="store_false", help="Disable runout monitoring.")
     ap.add_argument("--runout-debounce", type=float, help="Debounce time (seconds) applied to the runout input to ignore short glitches.")
+
+    ap.add_argument("--rearm-button-gpio", type=int,
+                help="Optional BCM GPIO pin for a physical rearm button (e.g., 25).")
+    ap.add_argument("--rearm-button-debounce", type=float,
+                help="Debounce time for rearm button presses in seconds (default: 0.25).")
+
     ap.add_argument("--verbose", dest="verbose", action="store_true", help="Verbose logging (includes serial chatter).")
     ap.add_argument("--no-verbose", dest="verbose", action="store_false", help="Disable verbose logging.")
     json_group = ap.add_mutually_exclusive_group()
@@ -726,6 +929,11 @@ def build_arg_parser(defaults=None):
     ap.add_argument("--pulse-window", type=float,
                     help="Window (seconds) used to compute pulses-per-second (pps) for breadcrumbs.")
     ap.add_argument("--stall-thresholds", help="Comma-separated seconds-since-last-pulse thresholds for 'stall' breadcrumbs while armed.")
+    sock_group = ap.add_mutually_exclusive_group()
+    sock_group.add_argument("--control-socket", dest="control_socket",
+                            help="Path to a local UNIX control socket (e.g. /run/filmon.sock). Use to rearm without sharing the printer serial port.")
+    sock_group.add_argument("--no-control-socket", dest="control_socket", action="store_const", const="",
+                            help="Disable the local control socket.")
     ap.add_argument("--config", help="Path to a TOML config file. CLI args override config values.")
     ap.add_argument("--print-config", action="store_true", help="Print the resolved configuration and exit.")
     ap.add_argument("--version", action="store_true", help="Print version and exit.")
@@ -847,6 +1055,9 @@ def main():
         breadcrumb_interval_s=args.breadcrumb_interval,
         pulse_window_s=args.pulse_window,
         stall_thresholds_s=args.stall_thresholds,
+rearm_button_gpio=args.rearm_button_gpio,
+rearm_button_active_high=False,
+rearm_button_debounce_s=args.rearm_button_debounce,
     )
 
     if not args.no_banner:
@@ -865,10 +1076,14 @@ def main():
             jam_timeout_s=args.jam_timeout,
             pause_gcode=args.pause_gcode,
             verbose=args.verbose,
+            control_socket=getattr(args, "control_socket", None),
         )
 
     mon.attach_serial(ser)
     mon.start_serial_reader(verbose=args.verbose)
+    # Local control socket (for re-arming/resetting without a second serial connection)
+    if getattr(args, "control_socket", None):
+        mon.start_control_socket(args.control_socket)
     mon.start()
 
     stop = threading.Event()
