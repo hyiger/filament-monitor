@@ -40,3 +40,7 @@ json = false
 breadcrumb_interval = 2.0
 pulse_window = 2.0
 stall_thresholds = "3,6"
+
+[control]
+# Local UNIX control socket used by filmonctl (useful when the daemon owns the printer serial port).
+socket = "/run/filmon/filmon.sock"
