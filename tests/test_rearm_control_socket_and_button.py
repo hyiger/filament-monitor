@@ -32,7 +32,7 @@ class DummySerial:
 
 def _make_monitor(monkeypatch, *, rearm_button_gpio=None):
     m = load_module()
-    monkeypatch.setattr(m, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
+    monkeypatch.setattr(m.monitor, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
 
     logger = CapturingLogger()
     state = m.MonitorState()
@@ -107,7 +107,7 @@ def test_control_socket_rearm_clears_latch_and_arms(monkeypatch, tmp_path):
 
 def test_rearm_button_is_active_low_with_pullup(monkeypatch):
     m = load_module()
-    monkeypatch.setattr(m, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
+    monkeypatch.setattr(m.monitor, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
 
     logger = CapturingLogger()
     state = m.MonitorState()
@@ -145,7 +145,7 @@ def test_rearm_button_short_press_triggers_reset(monkeypatch):
 
     # Patch time source
     tnow = {"t": 100.0}
-    monkeypatch.setattr(m, "now_s", lambda: tnow["t"], raising=True)
+    monkeypatch.setattr(m.monitor, "now_s", lambda: tnow["t"], raising=True)
 
     # Start from a latched + enabled/armed state
     mon.state.enabled = True
@@ -174,7 +174,7 @@ def test_rearm_button_long_press_triggers_rearm(monkeypatch):
 
     # Patch time source
     tnow = {"t": 200.0}
-    monkeypatch.setattr(m, "now_s", lambda: tnow["t"], raising=True)
+    monkeypatch.setattr(m.monitor, "now_s", lambda: tnow["t"], raising=True)
 
     # Start latched
     mon.state.enabled = True
@@ -200,7 +200,7 @@ def test_rearm_button_debounce_applies_on_press_edge(monkeypatch):
     m, mon, logger = _make_monitor(monkeypatch, rearm_button_gpio=25)
 
     tnow = {"t": 300.0}
-    monkeypatch.setattr(m, "now_s", lambda: tnow["t"], raising=True)
+    monkeypatch.setattr(m.monitor, "now_s", lambda: tnow["t"], raising=True)
 
     # Spy on actions
     calls = {"reset": 0, "rearm": 0}

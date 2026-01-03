@@ -324,210 +324,41 @@ rearm_button_debounce = 0.25
 rearm_button_long_press = 1.5
 ```
 
+
 ### CLI
 
 ```bash
 python filament-monitor.py \
   --rearm-button-gpio 25 \
-  --rearm-button-debounce 0.25 \
-  --rearm-button-long-press 1.5
+  --rearm-button-long-press 1.5 \
+  --rearm-button-debounce 0.25
 ```
 
-## Usage
+Supported options:
 
-Typical command line:
-```
-bash
-python filament-monitor.py -p /dev/ttyACM0 --motion-gpio 26 --runout-gpio 27 --runout-active-high
-```
+- `--rearm-button-gpio BCM_PIN`  
+  GPIO pin connected to the button.
 
-For help:
-```
-bash
-python filament-monitor.py -h
-```
+- `--rearm-button-long-press SECONDS`  
+  Duration that distinguishes a *long press* from a *short press*.
 
-## Configuration (TOML)
+- `--rearm-button-debounce SECONDS`  
+  Software debounce interval applied after button release.
 
-Use a TOML file to keep systemd `ExecStart` short.
+There are **no CLI flags** to control button polarity.
 
-**Precedence:** CLI arguments override TOML values, which override built-in defaults.
+#### Button polarity (config-only)
 
-Start from `config.example.toml`:
+Button polarity is configured **only via the config file**:
 
-```
-bash
-cp config.example.toml /etc/filmon/config.toml
+```toml
+rearm_button_active_high = false
 ```
 
-Run:
+- `false` (default): active-low (recommended)
+- `true`: active-high
 
-```
-bash
-python filament-monitor.py --config /etc/filmon/config.toml
-```
-
-Show the resolved configuration:
-
-```
-bash
-python filament-monitor.py --config /etc/filmon/config.toml --print-config
-```
-
-## Logging
-The monitor can emit either:
-
-- **Human-readable** logs (default) with millisecond timestamps
-- **JSON Lines** (one JSON object per line) with `--json` (recommended for analysis)
-
-Breadcrumbs:
-- `--verbose` enables **heartbeat** (`hb`) and **stall** breadcrumbs to help tune timeouts.
-- Default heartbeat interval: **2s**
-- Default stall thresholds: **3s, 6s** (seconds since last pulse while armed)
-
-When run under systemd, view logs with:
-
-```
-bash
-journalctl -u filament-monitor.service -f
-```
-
-## Diagnostic Breadcrumb Logging
-
-The monitor supports **breadcrumb logging** to provide low-rate, aggregated insight into filament motion without logging every sensor pulse. Breadcrumbs are intended for **tuning, validation, and post‑mortem analysis**, not for normal production logging.
-
-Breadcrumbs are **disabled by default** and are automatically enabled when running with `--verbose`.
-
-### Emitted breadcrumb events
-
-**`hb` — Heartbeat**  
-Emitted periodically while the monitor is enabled (default: every 2 seconds).
-
-Includes:
-- `dt_since_pulse` — seconds since the last motion pulse
-- `pps` — pulses per second over a sliding window
-- `pulses_reset` — pulses since last reset
-- `enabled`, `armed`, `latched` — current state
-
-Used to establish normal pulse cadence and measure worst‑case legitimate pulse gaps.
-
-**`stall` — Stall breadcrumb**  
-Emitted when `dt_since_pulse` exceeds configured thresholds **while armed**.
-
-Defaults: `3s`, `6s`
-
-Used to observe pulse starvation leading up to a jam and to verify that retract/travel patterns do **not** cause false triggers.
-
-**`first_pulse_after_arm`**  
-Emitted once after arming, when the first motion pulse is observed. Confirms correct arming placement and sensor engagement.
-
-**`pause_triggered`**  
-When a jam or runout is detected, the pause event includes breadcrumb evidence such as `dt_since_pulse`, `pps`, and pulse counters.
-
-### Breadcrumb-related command-line options
-
-```
---verbose
-    Enable diagnostic logging, including breadcrumb events (hb, stall, etc).
-
---breadcrumb-interval SECONDS
-    Heartbeat interval while enabled (default: 2.0).
-    Set to 0 to disable heartbeat breadcrumbs.
-
---stall-thresholds SECONDS[,SECONDS...]
-    Comma-separated list of stall thresholds in seconds.
-    Default: 3,6
-
---pulse-window SECONDS
-    Sliding window used to compute pulses-per-second (pps).
-    Default: 2.0
-```
-
-### Log formats
-
-Breadcrumbs are available in both log formats:
-
-- **Human-readable logs**
-  - Millisecond timestamps
-  - Suitable for live inspection (`tail -f`)
-- **JSON logs (`--json`)**
-  - Recommended for analysis and tooling
-  - Stable field names
-  - One JSON object per line (JSONL)
-
-Breadcrumbs indicate **observed conditions**, not errors. A stall breadcrumb does not imply a jam; it simply records a period without detected filament motion.
-
-## Troubleshooting
-- If you get no pulse events, confirm wiring, BCM numbering, and that your GPIO backend is installed.
-- If you see premature pauses at very low flow, do not arm on layer 1; arm at layer 2 and/or unarm during ultra-low-flow features.
-- If serial control markers are not observed, confirm the printer echoes `M118` messages to the console.
-
-#### Integration tests (virtual serial)
-
-Integration tests are marked with `@pytest.mark.integration` and are **not** run by default.
-
-Run them locally:
-
-```
-bash
-DD_TRACE_ENABLED=false pytest -q -m integration
-```
-
-On GitHub Actions, integration tests run via the manual workflow (**Actions → integration → Run workflow**).
-
-### Running unit tests
-
-> **Note on `ddtrace`:** On some systems, automatic `ddtrace` instrumentation can interfere with `pytest` (tests may hang or fail to import). If you encounter issues, disable it explicitly when running tests:
-
-```
-bash
-DD_TRACE_ENABLED=false pytest
-```
-
-This does not affect normal operation of `filament-monitor`.
-
----
-
-## Safety Invariants
-
-The following invariants are enforced by both runtime logic and unit tests:
-
-- Jam timers do **not** start until valid filament motion has been observed
-- `filmon:disable` or `filmon:reset` immediately cancels all active timers
-- Duplicate enable/disable markers are idempotent
-- GPIO callbacks are ignored once shutdown begins
-- A triggered pause blocks further detection until reset
-
-If any invariant cannot be satisfied, the monitor fails safe.
-
----
-
-## Default Parameters
-
-The following defaults are chosen to balance detection latency and false-positive resistance:
-
-- `jam_timeout_s`: **8.0**
-- `stall_thresholds`: **3,6**
-- `breadcrumb_interval`: **2.0**
-- `pulse_window`: **2.0**
-
-These values are validated for typical PLA printing with a 0.4 mm nozzle and normal perimeter/infill speeds. Adjust only after reviewing breadcrumb data.
-
-If the daemon owns the printer serial port, you can re-arm after clearing a jam using a physical button wired to a Raspberry Pi GPIO.
-
-- `--rearm-button-gpio BCM_PIN` (example: `25`)
-- `--rearm-button-active-high` (default) or `--rearm-button-active-low`
-- `--rearm-button-debounce SECONDS` (default: `0.25`)
-
-The button triggers the same action as `filmonctl rearm`: clears the latch, resets counters, and arms detection.
-
-
-
-### Physical rearm button (active-low)
-- Wire the button between **GPIO 25 and GND**
-- The input uses an internal pull-up
-- Pressing the button pulls the pin low and triggers a rearm
-- Debounce is handled in software
+If omitted, the monitor assumes an active-low button.
 
 Configuration:
 ```
@@ -537,4 +368,48 @@ rearm_button_gpio = 25
 rearm_button_active_high = false
 rearm_button_debounce
 rearm_button_long_press = 0.25
+```
+
+
+### run_doctor
+
+`run_doctor` performs a set of read-only diagnostics to validate wiring and configuration.
+
+If a rearm button is configured, `run_doctor` will additionally:
+
+- verify the button input is stable when idle
+- prompt for a **short press** (reset)
+- prompt for a **long press** (rearm)
+
+This interactive test **does not change monitor state, pause prints, or send any G-code**.
+
+
+### Rearm button behavior
+
+When a rearm button is configured:
+
+- **Short press** → reset  
+  Clears any latched fault and disables monitoring.
+
+- **Long press** → rearm  
+  Clears any latched fault and returns the monitor to an enabled + armed state.
+
+This behavior is validated by `run_doctor` and exercised by the integration tests.
+
+
+### Testing
+
+The integration test suite simulates:
+
+- Marlin-style serial streams
+- GPIO motion pulses
+- filament jam detection
+- resume activity
+- rearm button presses
+- filament runout
+
+Run integration tests with:
+
+```bash
+pytest -m integration
 ```

@@ -31,7 +31,7 @@ class DummySerial:
 def _make_monitor(monkeypatch, jam_timeout_s=1.0):
     m = load_module()
     # Patch the GPIO DigitalInputDevice used by the monitor.
-    monkeypatch.setattr(m, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
+    monkeypatch.setattr(m.monitor, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
 
     logger = CapturingLogger()
     state = m.MonitorState()
