@@ -146,23 +146,58 @@ M118 A1 filmon:disable
 ### State model
 The filament monitor operates as a small, explicit state machine. Understanding these states makes it easier to reason about false positives, layer-change behavior, and recovery after a pause.
 
-```
-mermaid
+### State model
+The filament monitor operates as a small, explicit state machine. Understanding these states makes it easier to reason about false positives, layer-change behavior, and recovery after a pause.
+
+```mermaid
 stateDiagram-v2
   [*] --> DISABLED: startup
 
-  DISABLED --> ENABLED_UNARMED: filmon enable
-  ENABLED_UNARMED --> DISABLED: filmon disable
-  ENABLED_ARMED --> DISABLED: filmon disable
-  LATCHED --> DISABLED: filmon disable
+  DISABLED --> ENABLED_UNARMED: filmon:enable
+  ENABLED_UNARMED --> DISABLED: filmon:disable
+  ENABLED_ARMED --> DISABLED: filmon:disable
+  LATCHED --> DISABLED: filmon:disable
 
-  ENABLED_UNARMED --> ENABLED_ARMED: filmon arm
+  ENABLED_UNARMED --> ENABLED_ARMED: filmon:arm
 
   ENABLED_ARMED --> LATCHED: jam timeout
   ENABLED_ARMED --> LATCHED: runout asserted
 
-  LATCHED --> ENABLED_UNARMED: filmon reset
+  LATCHED --> DISABLED: filmon:reset
+  LATCHED --> ENABLED_ARMED: rearm (button long-press / control-socket)
 ```
+
+**Notes (matches the implementation):**
+- **`filmon:reset` returns to `DISABLED`** (clears latch/counters and disables monitoring).
+- **`rearm` clears the latch and returns to `ENABLED_ARMED`** (enabled + armed). This can be triggered via the control socket, and (if configured) a **long press** on the rearm button.
+- While **`LATCHED`**, additional jam/runout detections are ignored until you `reset` or `rearm`.
+
+### Control inputs (markers, socket, button)
+
+The monitor can be controlled from multiple sources; they converge on the same state transitions.
+
+```mermaid
+flowchart TD
+  subgraph PrusaSlicer / G-code stream
+    A["Serial markers\n// filmon:enable\n// filmon:arm\n// filmon:disable\n// filmon:reset"]
+  end
+
+  subgraph Local control
+    B["Control socket\nreset / rearm / status"]
+    C["Optional GPIO button\nshort=reset\nlong=rearm"]
+  end
+
+  A --> D["Marker handler"]
+  B --> E["Socket handler"]
+  C --> F["Button handler"]
+
+  D --> G["State machine"]
+  E --> G
+  F --> G
+
+  G --> H["Actions\n- watch motion pulses\n- detect jam (timeout)\n- detect runout (input)\n- on fault: M400 then M600\n- latch until reset/rearm"]
+```
+
 
 **State legend**
 - **DISABLED** — monitoring is off; motion and runout checks are ignored.
