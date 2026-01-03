@@ -3,40 +3,33 @@
 
 The implementation lives in the `filmon` package; this script remains for
 backwards-compatible CLI usage and for test harnesses that load this file as a module.
+
+This file also re-exports a small set of symbols used by the unit/integration
+tests in this repository (and any third-party wrappers that relied on the
+previous monolithic layout).
 """
 
-from __future__ import annotations
-
-from filmon.cli import main
-from filmon.doctor import build_arg_parser, load_toml_config, config_defaults_from, apply_runout_guardrails
 import time
-from filmon.monitor import FilamentMonitor
+
+from filmon.cli import build_arg_parser, main
+from filmon import monitor as monitor
 from filmon.state import MonitorState
+from filmon.monitor import FilamentMonitor
 from filmon.logging import JsonLogger
-from filmon.constants import VERSION, USAGE_EXAMPLES, CONTROL_ENABLE, CONTROL_DISABLE, CONTROL_RESET, CONTROL_ARM, CONTROL_UNARM
-from filmon.util import now_s
-from filmon.gpio import DigitalInputDevice
-import filmon.gpio as gpio
-import filmon.monitor as monitor
-import filmon.doctor as doctor
-import filmon.serialio as serialio
+from filmon.constants import CONTROL_RESET
+from filmon.doctor import apply_runout_guardrails
+
 
 __all__ = [
-    "main",
-    "build_arg_parser",
-    "load_toml_config",
-    "config_defaults_from",
-    "apply_runout_guardrails",
-    "FilamentMonitor",
-    "MonitorState",
-    "JsonLogger",
-    "now_s",
     "time",
-    "DigitalInputDevice",
-    "gpio",
+    "build_arg_parser",
+    "main",
     "monitor",
-    "doctor",
-    "serialio",
+    "MonitorState",
+    "FilamentMonitor",
+    "JsonLogger",
+    "CONTROL_RESET",
+    "apply_runout_guardrails",
 ]
 
 

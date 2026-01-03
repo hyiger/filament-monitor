@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import collections
 import queue
-import re
 import socket
 import threading
 import time
@@ -11,7 +10,7 @@ from typing import Optional
 
 from .gpio import DigitalInputDevice
 from .logging import JsonLogger
-from .serialio import SerialThread, serial
+from .serialio import SerialThread
 from .state import MonitorState
 from .util import now_s
 from .constants import CONTROL_ENABLE, CONTROL_DISABLE, CONTROL_RESET, CONTROL_ARM, CONTROL_UNARM, VERSION

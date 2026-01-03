@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-from typing import Optional
 
 # ---------------- Dependencies ----------------
 #
 # The monitor can be imported without hardware dependencies so unit tests can run
 # on any machine. Hardware-specific imports are required at runtime when GPIO/serial
 # features are actually used.
-
-try:
-    import serial  # pyserial
-except ImportError:  # pragma: no cover
-    serial = None
 
 try:
     from gpiozero import DigitalInputDevice, Device
@@ -31,12 +25,6 @@ except ImportError:  # pragma: no cover
             self.when_activated = None
             self.when_deactivated = None
 
-VERSION = "1.0.4"
 
-CONTROL_ENABLE  = "filmon:enable"
-CONTROL_DISABLE = "filmon:disable"
-CONTROL_RESET   = "filmon:reset"
-CONTROL_ARM     = "filmon:arm"
-CONTROL_UNARM   = "filmon:unarm"
 
 
