@@ -22,6 +22,7 @@ from .logging import JsonLogger
 from .monitor import FilamentMonitor
 from .state import MonitorState
 from .util import now_s
+import threading
 
 def main():
     """CLI entry point. Parses args, configures the monitor, and starts the daemon."""
