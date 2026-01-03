@@ -53,6 +53,7 @@ def _make_monitor(monkeypatch, *, rearm_button_gpio=None):
         # active-low only build: argument exists but defaults to False
         rearm_button_active_high=False,
         rearm_button_debounce_s=0.25,
+        rearm_button_long_press_s=1.5,
     )
     mon._ser = DummySerial()
     return m, mon, logger
@@ -105,36 +106,133 @@ def test_control_socket_rearm_clears_latch_and_arms(monkeypatch, tmp_path):
 
 
 def test_rearm_button_is_active_low_with_pullup(monkeypatch):
-    m, mon, logger = _make_monitor(monkeypatch, rearm_button_gpio=25)
+    m = load_module()
+    monkeypatch.setattr(m, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
+
+    logger = CapturingLogger()
+    state = m.MonitorState()
+    mon = m.FilamentMonitor(
+        state=state,
+        logger=logger,
+        motion_gpio=26,
+        runout_gpio=27,
+        runout_active_high=True,
+        runout_debounce_s=0.02,
+        jam_timeout_s=1.0,
+        arm_min_pulses=1,
+        pause_gcode="M600",
+        breadcrumb_interval_s=0.5,
+        pulse_window_s=1.0,
+        stall_thresholds_s="0.5,0.8",
+        rearm_button_gpio=25,
+        rearm_button_active_high=False,   # active-low
+        rearm_button_debounce_s=0.25,
+        rearm_button_long_press_s=1.5,
+    )
+
     assert mon.rearm_button is not None
     assert mon.rearm_button.pin == 25
-    # Active-low only: internal pull-up enabled and action on deactivation (high->low)
     assert mon.rearm_button.pull_up is True
-    assert mon.rearm_button.when_deactivated is not None
-    assert mon.rearm_button.when_activated is None
+    # For active-low: press=when_deactivated, release=when_activated
+    assert callable(mon.rearm_button.when_deactivated)
+    assert callable(mon.rearm_button.when_activated)
+
+    mon.stop()
 
 
-def test_rearm_button_debounce(monkeypatch):
+def test_rearm_button_short_press_triggers_reset(monkeypatch):
     m, mon, logger = _make_monitor(monkeypatch, rearm_button_gpio=25)
 
-    calls = {"n": 0}
-    def fake_rearm():
-        calls["n"] += 1
-    mon._cmd_rearm = fake_rearm  # type: ignore
+    # Patch time source
+    tnow = {"t": 100.0}
+    monkeypatch.setattr(m, "now_s", lambda: tnow["t"], raising=True)
 
-    t = {"now": 100.0}
-    monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
+    # Start from a latched + enabled/armed state
+    mon.state.enabled = True
+    mon.state.armed = True
+    mon.state.latched = True
+    mon.state.motion_pulses_since_reset = 10
+    mon.state.motion_pulses_since_arm = 5
 
-    # First press triggers.
-    mon._on_rearm_button()
-    assert calls["n"] == 1
+    # Short press: press then release before long-press threshold
+    mon._on_rearm_button_press()
+    tnow["t"] += 0.4
+    mon._on_rearm_button_release()
 
-    # Within debounce interval -> ignored.
-    t["now"] += 0.10
-    mon._on_rearm_button()
-    assert calls["n"] == 1
+    # Reset semantics: disabled + disarmed + unlatched, counters cleared
+    assert mon.state.enabled is False
+    assert mon.state.armed is False
+    assert mon.state.latched is False
+    assert mon.state.motion_pulses_since_reset == 0
+    assert mon.state.motion_pulses_since_arm == 0
 
-    # After debounce interval -> triggers.
-    t["now"] += 0.30
-    mon._on_rearm_button()
-    assert calls["n"] == 2
+    mon.stop()
+
+
+def test_rearm_button_long_press_triggers_rearm(monkeypatch):
+    m, mon, logger = _make_monitor(monkeypatch, rearm_button_gpio=25)
+
+    # Patch time source
+    tnow = {"t": 200.0}
+    monkeypatch.setattr(m, "now_s", lambda: tnow["t"], raising=True)
+
+    # Start latched
+    mon.state.enabled = True
+    mon.state.armed = True
+    mon.state.latched = True
+    mon.state.motion_pulses_since_reset = 10
+    mon.state.motion_pulses_since_arm = 5
+
+    mon._on_rearm_button_press()
+    tnow["t"] += 2.0   # >= 1.5s long-press
+    mon._on_rearm_button_release()
+
+    assert mon.state.latched is False
+    assert mon.state.enabled is True
+    assert mon.state.armed is True
+    assert mon.state.motion_pulses_since_reset == 0
+    assert mon.state.motion_pulses_since_arm == 0
+
+    mon.stop()
+
+
+def test_rearm_button_debounce_applies_on_press_edge(monkeypatch):
+    m, mon, logger = _make_monitor(monkeypatch, rearm_button_gpio=25)
+
+    tnow = {"t": 300.0}
+    monkeypatch.setattr(m, "now_s", lambda: tnow["t"], raising=True)
+
+    # Spy on actions
+    calls = {"reset": 0, "rearm": 0}
+    monkeypatch.setattr(mon, "_cmd_rearm", lambda: calls.__setitem__("rearm", calls["rearm"] + 1), raising=True)
+
+    def fake_handle(line):
+        if m.CONTROL_RESET.lower() in line.lower():
+            calls["reset"] += 1
+    monkeypatch.setattr(mon, "_handle_control_marker", fake_handle, raising=True)
+
+    # First press/release -> short press reset
+    mon._on_rearm_button_press()
+    tnow["t"] += 0.05
+    mon._on_rearm_button_release()
+    assert calls["reset"] == 1
+    assert calls["rearm"] == 0
+
+    # Immediate second press within debounce -> ignored; release should do nothing
+    tnow["t"] += 0.10
+    mon._on_rearm_button_press()
+    tnow["t"] += 0.05
+    mon._on_rearm_button_release()
+    assert calls["reset"] == 1
+    assert calls["rearm"] == 0
+
+    # After debounce -> works again
+    tnow["t"] += 0.3
+    mon._on_rearm_button_press()
+    tnow["t"] += 0.2
+    mon._on_rearm_button_release()
+    assert calls["reset"] == 2
+    assert calls["rearm"] == 0
+
+    mon.stop()
+

@@ -20,6 +20,12 @@ runout_enabled = false
 runout_gpio = 27
 runout_active_high = false
 
+# Optional physical rearm button (active-low recommended): wire switch between GPIO and GND
+# rearm_button_gpio = 25
+# rearm_button_debounce = 0.25  # seconds (optional)
+# rearm_button_long_press = 1.5  # seconds; short press resets, long press rearms
+
+
 # Optional debounce (seconds); omit or set to null to disable
 # runout_debounce = 0.05  # seconds (optional)
 

@@ -91,11 +91,14 @@ CONTROL_RESET   = "filmon:reset"
 CONTROL_ARM     = "filmon:arm"
 CONTROL_UNARM   = "filmon:unarm"
 
+
 def now_s() -> float:
     """Return current monotonic time in seconds (float). Used for timeout math."""
     return time.monotonic()
 
 @dataclass
+
+
 class MonitorState:
     """Holds mutable runtime state for the monitor.
 
@@ -120,6 +123,7 @@ class MonitorState:
     serial_connected: bool = False
     serial_port: str = ""
     baud: int = 0
+
 
 class JsonLogger:
     """Minimal structured logger.
@@ -149,6 +153,7 @@ class JsonLogger:
             if fields:
                 msg += " " + " ".join(f"{k}={v}" for k, v in fields.items())
             print(msg, flush=True)
+
 
 class SerialThread(threading.Thread):
     """Background serial reader.
@@ -186,6 +191,7 @@ class SerialThread(threading.Thread):
                     pass
                 break
 
+
 class FilamentMonitor:
     """Filament motion/runout monitor controller.
 
@@ -210,10 +216,11 @@ class FilamentMonitor:
         rearm_button_gpio: Optional[int] = None,
         rearm_button_active_high: bool = False,
         rearm_button_debounce_s: float = 0.25,
+        rearm_button_long_press_s: float = 1.5,
     ):
         """
         Initialize the monitor.
-        
+
         Sets up GPIO inputs, thresholds, and serial control handling.
         Threads are started by start(); construction is side-effect free.
         """
@@ -221,7 +228,7 @@ class FilamentMonitor:
         self.logger = logger
         self.verbose = bool(verbose)
 
-        
+
         # Pulse breadcrumb / rate tracking
         self._pulse_times = collections.deque()  # monotonic timestamps of recent pulses
         self._pulse_window_s = float(pulse_window_s)
@@ -260,15 +267,28 @@ class FilamentMonitor:
         # Optional physical "rearm" button. Lets you re-arm without sharing the
         # printer serial port (useful when this daemon owns /dev/ttyACM0).
         self.rearm_button = None
-        self.rearm_button_active_high = rearm_button_active_high
-        self.rearm_button_debounce_s = rearm_button_debounce_s
+        self.rearm_button_active_high = bool(rearm_button_active_high)
+        self.rearm_button_debounce_s = float(rearm_button_debounce_s)
+        self.rearm_button_long_press_s = float(rearm_button_long_press_s)
         self._last_rearm_edge = 0.0
-
+        self._rearm_press_start_ts: float | None = None
 
         if rearm_button_gpio is not None:
-            # Active-low rearm button: GPIO pulled up, press shorts to GND.
-            self.rearm_button = DigitalInputDevice(rearm_button_gpio, pull_up=True)
-            self.rearm_button.when_deactivated = self._on_rearm_button
+            # Optional physical button.
+            #
+            # Active-low (recommended): enable pull-up, press shorts to GND.
+            # Active-high: enable pull-down (pull_up=False), press drives pin high.
+            pull_up = not self.rearm_button_active_high
+            self.rearm_button = DigitalInputDevice(rearm_button_gpio, pull_up=pull_up)
+
+            if self.rearm_button_active_high:
+                # press = activated (high), release = deactivated
+                self.rearm_button.when_activated = self._on_rearm_button_press
+                self.rearm_button.when_deactivated = self._on_rearm_button_release
+            else:
+                # press = deactivated (low), release = activated
+                self.rearm_button.when_deactivated = self._on_rearm_button_press
+                self.rearm_button.when_activated = self._on_rearm_button_release
 
 
         self._ser = None
@@ -282,15 +302,41 @@ class FilamentMonitor:
         self._control_stop_evt = threading.Event()
         self._control_sock_path: Optional[str] = None
 
-    
-    def _on_rearm_button(self):
-        """Handle a physical rearm button press with debounce."""
+
+    def _on_rearm_button_press(self):
+        """GPIO callback for the optional physical button *press*.
+
+        We debounce on the press edge and record the press start time. The action
+        (reset vs rearm) is chosen on release based on the press duration.
+        """
+        if self._stop_evt.is_set():
+            return
         now = now_s()
         if (now - self._last_rearm_edge) < self.rearm_button_debounce_s:
             return
         self._last_rearm_edge = now
-        # Rearm is idempotent; safe to call even if not currently latched.
-        self._cmd_rearm()
+        self._rearm_press_start_ts = now
+
+    def _on_rearm_button_release(self):
+        """GPIO callback for the optional physical button *release*.
+
+        Short press => reset (same semantics as `filmon:reset`).
+        Long press  => rearm (clear latch and arm detection).
+        """
+        if self._stop_evt.is_set():
+            return
+        if self._rearm_press_start_ts is None:
+            return
+        now = now_s()
+        dur = now - self._rearm_press_start_ts
+        self._rearm_press_start_ts = None
+
+        if dur >= self.rearm_button_long_press_s:
+            # Long press: rearm (clears latch and arms)
+            self._cmd_rearm()
+        else:
+            # Short press: reset (clears latch/counters and disables monitoring)
+            self._handle_control_marker(CONTROL_RESET)
 
     def _on_motion_pulse(self):
         """GPIO callback for filament-motion pulses.
@@ -318,7 +364,6 @@ class FilamentMonitor:
         self.state.last_pulse_ts = ts
         # New pulse resets stall breadcrumb progression.
         self._stall_next_idx = 0
-
 
 
     def _prune_pulses(self, now: float):
@@ -708,6 +753,7 @@ class FilamentMonitor:
             self._maybe_jam()
             self._maybe_breadcrumbs()
 
+
 def run_doctor(args):
     """Run environment checks (serial access, GPIO availability) and print diagnostics."""
     print("Doctor Mode (safe):")
@@ -734,6 +780,104 @@ def run_doctor(args):
     last_runout = None
     last_print = time.monotonic()
 
+
+    # Optional: Rearm button test (short press = reset, long press = rearm)
+    button_gpio = getattr(args, "rearm_button_gpio", None)
+    if button_gpio is not None:
+        active_high = bool(getattr(args, "rearm_button_active_high", False))
+        long_s = float(getattr(args, "rearm_button_long_press", 1.5) or 1.5)
+        debounce_s = float(getattr(args, "rearm_button_debounce", 0.25) or 0.25)
+
+        def is_pressed(dev):
+            v = dev.value
+            return (v == 1) if active_high else (v == 0)
+
+        def wait_for_state(dev, pressed: bool, timeout_s: float):
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if is_pressed(dev) == pressed:
+                    return True
+                time.sleep(0.01)
+            return False
+
+        print()
+        print("Rearm Button Test (optional)")
+        print(f"  GPIO={button_gpio} active_high={active_high} long_press_s={long_s:.2f} debounce_s={debounce_s:.2f}")
+        print("  This test is read-only: it does not change monitor state or send any G-code.")
+        print()
+
+        btn = DigitalInputDevice(button_gpio, pull_up=True)
+
+        # Ensure button starts released
+        if is_pressed(btn):
+            print("  WARN: button appears pressed at start. Please release it...")
+            if not wait_for_state(btn, pressed=False, timeout_s=10.0):
+                print("  WARN: button still appears pressed; skipping button test.")
+            else:
+                time.sleep(debounce_s)
+
+        # Idle stability check
+        unstable = False
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.0:
+            if is_pressed(btn):
+                unstable = True
+                break
+            time.sleep(0.01)
+
+        if unstable:
+            print("  WARN: button input toggled/pressed during idle check. Wiring/pull-up may be incorrect.")
+        else:
+            print("  OK: idle state stable (not pressed)")
+
+        # Short press test
+        print("  ACTION: short press (tap) the button now...")
+        if not wait_for_state(btn, pressed=True, timeout_s=10.0):
+            print("  WARN: no button press detected (short press test skipped)")
+        else:
+            t_press = time.monotonic()
+            if not wait_for_state(btn, pressed=False, timeout_s=10.0):
+                print("  WARN: button press detected but no release observed (short press test failed)")
+            else:
+                t_release = time.monotonic()
+                dur = t_release - t_press
+                time.sleep(debounce_s)
+                if dur >= long_s:
+                    print(f"  WARN: detected a long press ({dur:.2f}s) during short-press test; try a quicker tap.")
+                else:
+                    print(f"  OK: short press detected ({dur:.2f}s) => would trigger reset")
+
+        # Long press test
+        print("  ACTION: long press (hold) the button now, then release...")
+        if not wait_for_state(btn, pressed=True, timeout_s=10.0):
+            print("  WARN: no button press detected (long press test skipped)")
+        else:
+            t_press = time.monotonic()
+            # Wait until long-press threshold is reached (still pressed)
+            reached = False
+            deadline = t_press + long_s + 10.0
+            while time.monotonic() < deadline:
+                if not is_pressed(btn):
+                    break
+                if time.monotonic() - t_press >= long_s:
+                    reached = True
+                    break
+                time.sleep(0.01)
+
+            if not reached:
+                dur = time.monotonic() - t_press
+                print(f"  WARN: press released before long-press threshold ({dur:.2f}s < {long_s:.2f}s)")
+            else:
+                # Require release to complete the gesture
+                if not wait_for_state(btn, pressed=False, timeout_s=10.0):
+                    print("  WARN: long press threshold reached but no release observed (long press test failed)")
+                else:
+                    t_release = time.monotonic()
+                    dur = t_release - t_press
+                    time.sleep(debounce_s)
+                    print(f"  OK: long press detected ({dur:.2f}s) => would trigger rearm")
+
+        print()
     try:
         while True:
             if time.monotonic() - last_print >= 0.5:
@@ -749,6 +893,7 @@ def run_doctor(args):
             time.sleep(0.01)
     except KeyboardInterrupt:
         pass
+
 
 def run_self_test(args):
     """Exercise the monitor control-marker path and basic state transitions."""
@@ -911,6 +1056,9 @@ def build_arg_parser(defaults=None):
     ap.add_argument("--rearm-button-debounce", type=float,
                 help="Debounce time for rearm button presses in seconds (default: 0.25).")
 
+    ap.add_argument("--rearm-button-long-press", type=float,
+                help="Long-press threshold in seconds (default: 1.5). Short press resets; long press rearms.")
+
     ap.add_argument("--verbose", dest="verbose", action="store_true", help="Verbose logging (includes serial chatter).")
     ap.add_argument("--no-verbose", dest="verbose", action="store_false", help="Disable verbose logging.")
     json_group = ap.add_mutually_exclusive_group()
@@ -969,6 +1117,7 @@ def apply_runout_guardrails(args):
 
     return sorted(set(ignored))
 
+
 def main():
     """CLI entry point. Parses args, configures the monitor, and starts the daemon."""
     ap = build_arg_parser()
@@ -997,7 +1146,6 @@ def main():
     if serial is None:  # pragma: no cover
         print("ERROR: pyserial is not installed. Install it with: pip install pyserial", file=sys.stderr)
         return 2
-
 
 
     # Runout option guardrails
@@ -1055,9 +1203,9 @@ def main():
         breadcrumb_interval_s=args.breadcrumb_interval,
         pulse_window_s=args.pulse_window,
         stall_thresholds_s=args.stall_thresholds,
-rearm_button_gpio=args.rearm_button_gpio,
-rearm_button_active_high=False,
-rearm_button_debounce_s=args.rearm_button_debounce,
+        rearm_button_gpio=args.rearm_button_gpio,
+        rearm_button_active_high=False,
+        rearm_button_debounce_s=args.rearm_button_debounce,
     )
 
     if not args.no_banner:

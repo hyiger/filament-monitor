@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+serial = pytest.importorskip("serial")
+
 
 def _read_available(fd: int, timeout_s: float = 0.2) -> bytes:
     """Read whatever is available on an fd without blocking too long."""
@@ -88,6 +90,8 @@ def test_virtual_serial_prusa_like_jam_triggers_pause(tmp_path: Path):
         _write_line(master_fd, "M118 A1 filmon:reset")
         _write_line(master_fd, "ok")
         _write_line(master_fd, "M118 A1 filmon:enable")
+        _write_line(master_fd, "ok")
+        _write_line(master_fd, "M118 A1 filmon:arm")
         _write_line(master_fd, "ok")
 
         # Some extrusion moves (enough to make "jam expected" meaningful)
