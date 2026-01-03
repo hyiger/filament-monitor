@@ -210,6 +210,7 @@ class FilamentMonitor:
         rearm_button_gpio: Optional[int] = None,
         rearm_button_active_high: bool = False,
         rearm_button_debounce_s: float = 0.25,
+        rearm_button_long_press_s: float = 1.5,
     ):
         """
         Initialize the monitor.
@@ -260,15 +261,28 @@ class FilamentMonitor:
         # Optional physical "rearm" button. Lets you re-arm without sharing the
         # printer serial port (useful when this daemon owns /dev/ttyACM0).
         self.rearm_button = None
-        self.rearm_button_active_high = rearm_button_active_high
-        self.rearm_button_debounce_s = rearm_button_debounce_s
+        self.rearm_button_active_high = bool(rearm_button_active_high)
+        self.rearm_button_debounce_s = float(rearm_button_debounce_s)
+        self.rearm_button_long_press_s = float(rearm_button_long_press_s)
         self._last_rearm_edge = 0.0
-
+        self._rearm_press_start_ts: float | None = None
 
         if rearm_button_gpio is not None:
-            # Active-low rearm button: GPIO pulled up, press shorts to GND.
-            self.rearm_button = DigitalInputDevice(rearm_button_gpio, pull_up=True)
-            self.rearm_button.when_deactivated = self._on_rearm_button
+            # Optional physical button.
+            #
+            # Active-low (recommended): enable pull-up, press shorts to GND.
+            # Active-high: enable pull-down (pull_up=False), press drives pin high.
+            pull_up = not self.rearm_button_active_high
+            self.rearm_button = DigitalInputDevice(rearm_button_gpio, pull_up=pull_up)
+
+            if self.rearm_button_active_high:
+                # press = activated (high), release = deactivated
+                self.rearm_button.when_activated = self._on_rearm_button_press
+                self.rearm_button.when_deactivated = self._on_rearm_button_release
+            else:
+                # press = deactivated (low), release = activated
+                self.rearm_button.when_deactivated = self._on_rearm_button_press
+                self.rearm_button.when_activated = self._on_rearm_button_release
 
 
         self._ser = None
@@ -283,14 +297,40 @@ class FilamentMonitor:
         self._control_sock_path: Optional[str] = None
 
     
-    def _on_rearm_button(self):
-        """Handle a physical rearm button press with debounce."""
+    def _on_rearm_button_press(self):
+        """GPIO callback for the optional physical button *press*.
+
+        We debounce on the press edge and record the press start time. The action
+        (reset vs rearm) is chosen on release based on the press duration.
+        """
+        if self._stop_evt.is_set():
+            return
         now = now_s()
         if (now - self._last_rearm_edge) < self.rearm_button_debounce_s:
             return
         self._last_rearm_edge = now
-        # Rearm is idempotent; safe to call even if not currently latched.
-        self._cmd_rearm()
+        self._rearm_press_start_ts = now
+
+    def _on_rearm_button_release(self):
+        """GPIO callback for the optional physical button *release*.
+
+        Short press => reset (same semantics as `filmon:reset`).
+        Long press  => rearm (clear latch and arm detection).
+        """
+        if self._stop_evt.is_set():
+            return
+        if self._rearm_press_start_ts is None:
+            return
+        now = now_s()
+        dur = now - self._rearm_press_start_ts
+        self._rearm_press_start_ts = None
+
+        if dur >= self.rearm_button_long_press_s:
+            # Long press: rearm (clears latch and arms)
+            self._cmd_rearm()
+        else:
+            # Short press: reset (clears latch/counters and disables monitoring)
+            self._handle_control_marker(CONTROL_RESET)
 
     def _on_motion_pulse(self):
         """GPIO callback for filament-motion pulses.
@@ -910,6 +950,9 @@ def build_arg_parser(defaults=None):
                 help="Optional BCM GPIO pin for a physical rearm button (e.g., 25).")
     ap.add_argument("--rearm-button-debounce", type=float,
                 help="Debounce time for rearm button presses in seconds (default: 0.25).")
+
+    ap.add_argument("--rearm-button-long-press", type=float,
+                help="Long-press threshold in seconds (default: 1.5). Short press resets; long press rearms.")
 
     ap.add_argument("--verbose", dest="verbose", action="store_true", help="Verbose logging (includes serial chatter).")
     ap.add_argument("--no-verbose", dest="verbose", action="store_false", help="Disable verbose logging.")

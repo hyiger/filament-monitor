@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+serial = pytest.importorskip("serial")
+
 
 def _read_available(fd: int, timeout_s: float = 0.2) -> bytes:
     """Read whatever is available on an fd without blocking too long."""
