@@ -3,6 +3,11 @@ from __future__ import annotations
 import sys
 import json
 
+try:
+    import serial  # pyserial
+except Exception:  # pragma: no cover
+    serial = None
+
 from .constants import VERSION, USAGE_EXAMPLES
 
 from .doctor import (
