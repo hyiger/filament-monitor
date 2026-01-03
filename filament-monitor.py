@@ -1203,9 +1203,9 @@ def main():
         breadcrumb_interval_s=args.breadcrumb_interval,
         pulse_window_s=args.pulse_window,
         stall_thresholds_s=args.stall_thresholds,
-rearm_button_gpio=args.rearm_button_gpio,
-rearm_button_active_high=False,
-rearm_button_debounce_s=args.rearm_button_debounce,
+        rearm_button_gpio=args.rearm_button_gpio,
+        rearm_button_active_high=False,
+        rearm_button_debounce_s=args.rearm_button_debounce,
     )
 
     if not args.no_banner:
