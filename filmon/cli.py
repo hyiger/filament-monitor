@@ -24,6 +24,7 @@ from .state import MonitorState
 from .util import now_s
 import threading
 import signal
+import time
 
 def main():
     """CLI entry point. Parses args, configures the monitor, and starts the daemon."""

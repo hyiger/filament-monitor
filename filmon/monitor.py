@@ -15,6 +15,7 @@ from .serialio import SerialThread, serial
 from .state import MonitorState
 from .util import now_s
 from .constants import CONTROL_ENABLE, CONTROL_DISABLE, CONTROL_RESET, CONTROL_ARM, CONTROL_UNARM, VERSION
+import os
 
 class FilamentMonitor:
     """Filament motion/runout monitor controller.
