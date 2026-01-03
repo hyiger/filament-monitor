@@ -15,6 +15,10 @@ class FakeSerial:
         self.writes.append(b)
         return len(b)
 
+    def flush(self):
+        # pyserial compatibility (no-op for test double)
+        return None
+
 
 def _extract_serial_payloads(log_text: str) -> List[str]:
     payloads: List[str] = []
