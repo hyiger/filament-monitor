@@ -25,3 +25,17 @@ This monitor is intentionally conservative:
 The goal is predictable, reviewable behavior rather than aggressive detection.
 
 ---
+
+
+## Code structure
+
+The project is organized as a small package with a thin CLI entrypoint:
+
+- **filament-monitor.py** – command-line entrypoint and configuration loading
+- **filmon.monitor** – core monitoring logic and jam/runout detection
+- **filmon.state** – explicit state machine and transitions
+- **filmon.serialio** – Marlin serial I/O and G-code emission
+- **filmon.gpio** – motion sensor, runout input, and optional rearm button handling
+- **filmon.doctor** – `run_doctor` diagnostics and interactive checks
+
+This structure improves testability and keeps hardware, protocol, and state logic cleanly separated.

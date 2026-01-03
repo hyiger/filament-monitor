@@ -538,3 +538,47 @@ rearm_button_active_high = false
 rearm_button_debounce
 rearm_button_long_press = 0.25
 ```
+
+
+### run_doctor
+
+`run_doctor` performs a set of read-only diagnostics to validate wiring and configuration.
+
+If a rearm button is configured, `run_doctor` will additionally:
+
+- verify the button input is stable when idle
+- prompt for a **short press** (reset)
+- prompt for a **long press** (rearm)
+
+This interactive test **does not change monitor state, pause prints, or send any G-code**.
+
+
+### Rearm button behavior
+
+When a rearm button is configured:
+
+- **Short press** → reset  
+  Clears any latched fault and disables monitoring.
+
+- **Long press** → rearm  
+  Clears any latched fault and returns the monitor to an enabled + armed state.
+
+This behavior is validated by `run_doctor` and exercised by the integration tests.
+
+
+### Testing
+
+The integration test suite simulates:
+
+- Marlin-style serial streams
+- GPIO motion pulses
+- filament jam detection
+- resume activity
+- rearm button presses
+- filament runout
+
+Run integration tests with:
+
+```bash
+pytest -m integration
+```
