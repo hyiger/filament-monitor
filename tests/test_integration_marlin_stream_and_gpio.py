@@ -1,7 +1,7 @@
 import re
 import math
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 import pytest
 
@@ -17,7 +17,7 @@ class FakeSerial:
 
 
 def _extract_serial_payloads(log_text: str) -> List[str]:
-    payloads = []
+    payloads: List[str] = []
     for ln in log_text.splitlines():
         if "serial line=" not in ln:
             continue
@@ -28,14 +28,10 @@ def _extract_serial_payloads(log_text: str) -> List[str]:
 
 
 def _sum_positive_extrusion_mm(gcode_text: str) -> float:
-    """Sum positive E deltas from G0/G1 in a G-code snippet.
-
-    Supports both absolute (M82) and relative (M83) extrusion modes.
-    """
+    """Sum positive extrusion length from a G-code snippet (absolute or relative E)."""
     e_abs = True
     last_e = 0.0
     total = 0.0
-
     for raw in gcode_text.splitlines():
         line = raw.strip()
         if not line or line.startswith(";"):
@@ -48,7 +44,6 @@ def _sum_positive_extrusion_mm(gcode_text: str) -> float:
             continue
         if not (line.startswith("G0") or line.startswith("G1")):
             continue
-
         m = re.search(r"\bE(-?\d*\.?\d+)\b", line)
         if not m:
             continue
@@ -58,25 +53,44 @@ def _sum_positive_extrusion_mm(gcode_text: str) -> float:
             last_e = e
         if de > 0:
             total += de
-
     return total
+
+
+# Local minimal test helpers to avoid importing from tests as a package
+class CapturingLogger:
+    def __init__(self):
+        self.events = []
+
+    def emit(self, name: str, **kwargs):
+        self.events.append((name, kwargs))
+
+
+class DummyDigitalInputDevice:
+    def __init__(self, pin, pull_up=True):
+        self.pin = pin
+        self.pull_up = pull_up
+        self.when_activated = None
+        self.when_deactivated = None
+
+    def close(self):
+        pass
 
 
 @pytest.mark.integration
 def test_marlin_like_serial_stream_gpio_activity_rearm_then_runout(monkeypatch):
-    """Integration-style scenario aligned to monitor.log:
+    """Log-aligned integration test (in-process).
 
-    1) Feed comment-style markers: `// filmon:reset`, `// filmon:enable`, `// filmon:arm`
-    2) Simulate normal printing activity via motion GPIO pulses (no jam)
-    3) Simulate a filament jam by stopping pulses past `jam_timeout_s` => expect `M400` then `M600`, and latch
-    4) Simulate "resume" activity (pulses continue) while latched => should NOT trigger additional pauses
-    5) Long-press the optional rearm button => clears latch and arms
-    6) Simulate more activity (pulses) => no jam
-    7) Simulate filament runout => expect another `M400` then `M600`, and latch again
+    Sequence:
+      - reset/enable/arm via comment-style markers (as seen in monitor.log)
+      - pulses => no jam
+      - stop pulses => jam => M400 then M600, latched
+      - pulses while latched => no extra pause
+      - long-press rearm button => clears latch + arms
+      - pulses => ok
+      - runout asserted => M400 then M600, latched
     """
-    m = load_module()  # provided by tests/conftest.py
+    m = load_module()  # from tests/conftest.py
 
-    from tests.test_rearm_control_socket_and_button import DummyDigitalInputDevice, CapturingLogger
     monkeypatch.setattr(m, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -114,11 +128,9 @@ def test_marlin_like_serial_stream_gpio_activity_rearm_then_runout(monkeypatch):
     fake_ser = FakeSerial()
     mon.attach_serial(fake_ser)
 
-    # Deterministic time
     t = {"now": 0.0}
     monkeypatch.setattr(m, "now_s", lambda: t["now"], raising=True)
 
-    # Feed chatter + markers (matching monitor.log style)
     for line in [
         "start",
         "echo:busy: processing",
@@ -138,65 +150,56 @@ def test_marlin_like_serial_stream_gpio_activity_rearm_then_runout(monkeypatch):
     assert mon.state.armed is True
     assert mon.state.latched is False
 
-    # --- Phase A: normal activity (pulses) ---
     mm_per_pulse = 2.88
-    total_e = _sum_positive_extrusion_mm(gcode_text)
-    total_e = min(total_e, 20.0)
+    total_e = min(_sum_positive_extrusion_mm(gcode_text), 20.0)
     pulses = max(6, int(math.ceil(total_e / mm_per_pulse)))
     dt = 1.0 / pulses
 
+    # activity => no jam
     for _ in range(pulses):
         mon._on_motion_pulse()
         t["now"] += dt
         mon._maybe_jam()
 
-    writes = b"".join(fake_ser.writes)
-    assert writes.count(b"M600") == 0
+    assert b"M600" not in b"".join(fake_ser.writes)
 
-    # --- Phase B: jam (stop pulses past timeout) ---
+    # jam: stop pulses past timeout
     t["now"] += 1.2
     mon._maybe_jam()
 
     writes = b"".join(fake_ser.writes)
-    assert b"M400" in writes
     assert writes.count(b"M600") == 1
+    assert b"M400" in writes
     assert mon.state.latched is True
 
-    # --- Phase C: "resumed" activity while latched (should not repause) ---
+    # resumed activity while latched => no extra pause
     for _ in range(5):
         mon._on_motion_pulse()
         t["now"] += 0.05
         mon._maybe_jam()
+    assert b"".join(fake_ser.writes).count(b"M600") == 1
 
-    writes = b"".join(fake_ser.writes)
-    assert writes.count(b"M600") == 1, "No additional pause should occur while latched."
-
-    # --- Phase D: long press rearm button ---
+    # long-press rearm
     mon._on_rearm_button_press()
-    t["now"] += 0.6  # >= long_press threshold (0.5s)
+    t["now"] += 0.6
     mon._on_rearm_button_release()
-
     assert mon.state.latched is False
     assert mon.state.enabled is True
     assert mon.state.armed is True
 
-    # --- Phase E: more activity after rearm ---
+    # more activity
     for _ in range(8):
         mon._on_motion_pulse()
         t["now"] += 0.05
         mon._maybe_jam()
+    assert b"".join(fake_ser.writes).count(b"M600") == 1
 
-    writes = b"".join(fake_ser.writes)
-    assert writes.count(b"M600") == 1
-
-    # --- Phase F: filament runout ---
-    # Ensure we're past debounce window
+    # runout asserted
     t["now"] += 0.1
     mon._on_runout_asserted()
-
     writes = b"".join(fake_ser.writes)
     assert writes.count(b"M600") == 2
+    assert b"M400" in writes
     assert mon.state.latched is True
 
     mon.stop()
-

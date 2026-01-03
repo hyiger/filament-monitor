@@ -91,6 +91,8 @@ def test_virtual_serial_prusa_like_jam_triggers_pause(tmp_path: Path):
         _write_line(master_fd, "ok")
         _write_line(master_fd, "M118 A1 filmon:enable")
         _write_line(master_fd, "ok")
+        _write_line(master_fd, "M118 A1 filmon:arm")
+        _write_line(master_fd, "ok")
 
         # Some extrusion moves (enough to make "jam expected" meaningful)
         _write_line(master_fd, "G92 E0")
