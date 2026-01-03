@@ -153,17 +153,17 @@ The filament monitor operates as a small, explicit state machine. Understanding 
 stateDiagram-v2
   [*] --> DISABLED: startup
 
-  DISABLED --> ENABLED_UNARMED: filmon:enable
-  ENABLED_UNARMED --> DISABLED: filmon:disable
-  ENABLED_ARMED --> DISABLED: filmon:disable
-  LATCHED --> DISABLED: filmon:disable
+  DISABLED --> ENABLED_UNARMED: filmon enable
+  ENABLED_UNARMED --> DISABLED: filmon disable
+  ENABLED_ARMED --> DISABLED: filmon disable
+  LATCHED --> DISABLED: filmon disable
 
-  ENABLED_UNARMED --> ENABLED_ARMED: filmon:arm
+  ENABLED_UNARMED --> ENABLED_ARMED: filmon arm
 
   ENABLED_ARMED --> LATCHED: jam timeout
   ENABLED_ARMED --> LATCHED: runout asserted
 
-  LATCHED --> DISABLED: filmon:reset
+  LATCHED --> DISABLED: filmon reset
   LATCHED --> ENABLED_ARMED: rearm (button long-press / control-socket)
 ```
 
