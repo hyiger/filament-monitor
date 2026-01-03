@@ -91,11 +91,14 @@ CONTROL_RESET   = "filmon:reset"
 CONTROL_ARM     = "filmon:arm"
 CONTROL_UNARM   = "filmon:unarm"
 
+
 def now_s() -> float:
     """Return current monotonic time in seconds (float). Used for timeout math."""
     return time.monotonic()
 
 @dataclass
+
+
 class MonitorState:
     """Holds mutable runtime state for the monitor.
 
@@ -120,6 +123,7 @@ class MonitorState:
     serial_connected: bool = False
     serial_port: str = ""
     baud: int = 0
+
 
 class JsonLogger:
     """Minimal structured logger.
@@ -149,6 +153,7 @@ class JsonLogger:
             if fields:
                 msg += " " + " ".join(f"{k}={v}" for k, v in fields.items())
             print(msg, flush=True)
+
 
 class SerialThread(threading.Thread):
     """Background serial reader.
@@ -186,6 +191,7 @@ class SerialThread(threading.Thread):
                     pass
                 break
 
+
 class FilamentMonitor:
     """Filament motion/runout monitor controller.
 
@@ -214,7 +220,7 @@ class FilamentMonitor:
     ):
         """
         Initialize the monitor.
-        
+
         Sets up GPIO inputs, thresholds, and serial control handling.
         Threads are started by start(); construction is side-effect free.
         """
@@ -222,7 +228,7 @@ class FilamentMonitor:
         self.logger = logger
         self.verbose = bool(verbose)
 
-        
+
         # Pulse breadcrumb / rate tracking
         self._pulse_times = collections.deque()  # monotonic timestamps of recent pulses
         self._pulse_window_s = float(pulse_window_s)
@@ -296,7 +302,7 @@ class FilamentMonitor:
         self._control_stop_evt = threading.Event()
         self._control_sock_path: Optional[str] = None
 
-    
+
     def _on_rearm_button_press(self):
         """GPIO callback for the optional physical button *press*.
 
@@ -358,7 +364,6 @@ class FilamentMonitor:
         self.state.last_pulse_ts = ts
         # New pulse resets stall breadcrumb progression.
         self._stall_next_idx = 0
-
 
 
     def _prune_pulses(self, now: float):
@@ -748,6 +753,7 @@ class FilamentMonitor:
             self._maybe_jam()
             self._maybe_breadcrumbs()
 
+
 def run_doctor(args):
     """Run environment checks (serial access, GPIO availability) and print diagnostics."""
     print("Doctor Mode (safe):")
@@ -887,6 +893,7 @@ def run_doctor(args):
             time.sleep(0.01)
     except KeyboardInterrupt:
         pass
+
 
 def run_self_test(args):
     """Exercise the monitor control-marker path and basic state transitions."""
@@ -1110,6 +1117,7 @@ def apply_runout_guardrails(args):
 
     return sorted(set(ignored))
 
+
 def main():
     """CLI entry point. Parses args, configures the monitor, and starts the daemon."""
     ap = build_arg_parser()
@@ -1138,7 +1146,6 @@ def main():
     if serial is None:  # pragma: no cover
         print("ERROR: pyserial is not installed. Install it with: pip install pyserial", file=sys.stderr)
         return 2
-
 
 
     # Runout option guardrails
