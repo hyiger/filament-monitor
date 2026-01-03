@@ -774,6 +774,104 @@ def run_doctor(args):
     last_runout = None
     last_print = time.monotonic()
 
+
+    # Optional: Rearm button test (short press = reset, long press = rearm)
+    button_gpio = getattr(args, "rearm_button_gpio", None)
+    if button_gpio is not None:
+        active_high = bool(getattr(args, "rearm_button_active_high", False))
+        long_s = float(getattr(args, "rearm_button_long_press", 1.5) or 1.5)
+        debounce_s = float(getattr(args, "rearm_button_debounce", 0.25) or 0.25)
+
+        def is_pressed(dev):
+            v = dev.value
+            return (v == 1) if active_high else (v == 0)
+
+        def wait_for_state(dev, pressed: bool, timeout_s: float):
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if is_pressed(dev) == pressed:
+                    return True
+                time.sleep(0.01)
+            return False
+
+        print()
+        print("Rearm Button Test (optional)")
+        print(f"  GPIO={button_gpio} active_high={active_high} long_press_s={long_s:.2f} debounce_s={debounce_s:.2f}")
+        print("  This test is read-only: it does not change monitor state or send any G-code.")
+        print()
+
+        btn = DigitalInputDevice(button_gpio, pull_up=True)
+
+        # Ensure button starts released
+        if is_pressed(btn):
+            print("  WARN: button appears pressed at start. Please release it...")
+            if not wait_for_state(btn, pressed=False, timeout_s=10.0):
+                print("  WARN: button still appears pressed; skipping button test.")
+            else:
+                time.sleep(debounce_s)
+
+        # Idle stability check
+        unstable = False
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.0:
+            if is_pressed(btn):
+                unstable = True
+                break
+            time.sleep(0.01)
+
+        if unstable:
+            print("  WARN: button input toggled/pressed during idle check. Wiring/pull-up may be incorrect.")
+        else:
+            print("  OK: idle state stable (not pressed)")
+
+        # Short press test
+        print("  ACTION: short press (tap) the button now...")
+        if not wait_for_state(btn, pressed=True, timeout_s=10.0):
+            print("  WARN: no button press detected (short press test skipped)")
+        else:
+            t_press = time.monotonic()
+            if not wait_for_state(btn, pressed=False, timeout_s=10.0):
+                print("  WARN: button press detected but no release observed (short press test failed)")
+            else:
+                t_release = time.monotonic()
+                dur = t_release - t_press
+                time.sleep(debounce_s)
+                if dur >= long_s:
+                    print(f"  WARN: detected a long press ({dur:.2f}s) during short-press test; try a quicker tap.")
+                else:
+                    print(f"  OK: short press detected ({dur:.2f}s) => would trigger reset")
+
+        # Long press test
+        print("  ACTION: long press (hold) the button now, then release...")
+        if not wait_for_state(btn, pressed=True, timeout_s=10.0):
+            print("  WARN: no button press detected (long press test skipped)")
+        else:
+            t_press = time.monotonic()
+            # Wait until long-press threshold is reached (still pressed)
+            reached = False
+            deadline = t_press + long_s + 10.0
+            while time.monotonic() < deadline:
+                if not is_pressed(btn):
+                    break
+                if time.monotonic() - t_press >= long_s:
+                    reached = True
+                    break
+                time.sleep(0.01)
+
+            if not reached:
+                dur = time.monotonic() - t_press
+                print(f"  WARN: press released before long-press threshold ({dur:.2f}s < {long_s:.2f}s)")
+            else:
+                # Require release to complete the gesture
+                if not wait_for_state(btn, pressed=False, timeout_s=10.0):
+                    print("  WARN: long press threshold reached but no release observed (long press test failed)")
+                else:
+                    t_release = time.monotonic()
+                    dur = t_release - t_press
+                    time.sleep(debounce_s)
+                    print(f"  OK: long press detected ({dur:.2f}s) => would trigger rearm")
+
+        print()
     try:
         while True:
             if time.monotonic() - last_print >= 0.5:
