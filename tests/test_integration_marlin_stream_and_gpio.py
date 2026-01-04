@@ -95,7 +95,7 @@ def test_marlin_like_serial_stream_gpio_activity_rearm_then_runout(monkeypatch):
     """
     m = load_module()  # from tests/conftest.py
 
-    monkeypatch.setattr(m, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
+    monkeypatch.setattr(m.monitor, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
 
     repo_root = Path(__file__).resolve().parents[1]
     log_text = (repo_root / "tests" / "data" / "monitor.log").read_text(errors="replace")
@@ -133,7 +133,7 @@ def test_marlin_like_serial_stream_gpio_activity_rearm_then_runout(monkeypatch):
     mon.attach_serial(fake_ser)
 
     t = {"now": 0.0}
-    monkeypatch.setattr(m, "now_s", lambda: t["now"], raising=True)
+    monkeypatch.setattr(m.monitor, "now_s", lambda: t["now"], raising=True)
 
     for line in [
         "start",
