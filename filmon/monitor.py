@@ -100,6 +100,7 @@ class FilamentMonitor:
         self.runout_debounce_s = runout_debounce_s
         # Adaptive jam timeout (optional; config-only)
         self.jam_timeout_adaptive = jam_timeout_adaptive
+        self.state.jam_timeout_adaptive = jam_timeout_adaptive
         self._last_runout_edge = 0.0
 
         if runout_gpio is not None:
