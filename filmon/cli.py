@@ -3,10 +3,6 @@ from __future__ import annotations
 import sys
 import json
 
-def _cfg_or_arg(cfg_val, arg_val):
-    """Return cfg_val unless arg_val is explicitly set (not None)."""
-    return cfg_val if arg_val is None else arg_val
-
 
 try:
     import serial  # pyserial
@@ -110,7 +106,7 @@ def main():
         runout_active_high=args.runout_active_high,
         runout_debounce_s=args.runout_debounce,
         jam_timeout_s=args.jam_timeout,
-        jam_timeout_adaptive=_cfg_or_arg(cfg.get('jam_timeout_adaptive', False), getattr(args, 'jam_timeout_adaptive', None)),
+        jam_timeout_adaptive=detection_detection_cfg.get('jam_timeout_adaptive', False),
         jam_timeout_min_s=getattr(args, "jam_timeout_min", 6.0),
         jam_timeout_max_s=getattr(args, "jam_timeout_max", 18.0),
         jam_timeout_k=getattr(args, "jam_timeout_k", 16.0),
@@ -143,7 +139,7 @@ def main():
             runout_active_high=args.runout_active_high,
             arm_min_pulses=args.arm_min_pulses,
             jam_timeout_s=args.jam_timeout,
-        jam_timeout_adaptive=_cfg_or_arg(cfg.get('jam_timeout_adaptive', False), getattr(args, 'jam_timeout_adaptive', None)),
+        jam_timeout_adaptive=detection_detection_cfg.get('jam_timeout_adaptive', False),
         jam_timeout_min_s=getattr(args, "jam_timeout_min", 6.0),
         jam_timeout_max_s=getattr(args, "jam_timeout_max", 18.0),
         jam_timeout_k=getattr(args, "jam_timeout_k", 16.0),
