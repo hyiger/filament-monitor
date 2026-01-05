@@ -24,6 +24,7 @@ runout_active_high = false
 # rearm_button_gpio = 25
 # rearm_button_debounce = 0.25  # seconds (optional)
 # rearm_button_long_press = 1.5  # seconds; short press resets, long press rearms
+# rearm_button_active_high = false  # config-only polarity (false=active-low recommended)
 
 
 # Optional debounce (seconds); omit or set to null to disable
@@ -35,6 +36,16 @@ arm_min_pulses = 12
 
 # Seconds without motion (after arming) before declaring a jam
 jam_timeout = 8.0
+
+# Optional: adaptive jam timeout (pps-based) to reduce false stalls during sparse extrusion
+# jam_timeout_adaptive = true
+# jam_timeout_min = 6.0
+# jam_timeout_max = 18.0
+# jam_timeout_k = 16.0
+# jam_timeout_pps_floor = 0.3
+# jam_timeout_ema_halflife = 3.0
+# arm_grace_pulses = 12
+# arm_grace_s = 12.0
 
 # G-code sent when a jam/runout is detected
 pause_gcode = "M600"

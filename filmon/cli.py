@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import json
 
+
 try:
     import serial  # pyserial
 except Exception:  # pragma: no cover
@@ -35,10 +36,13 @@ def main():
 
     args = ap.parse_args()
 
+    detection_cfg = {}
+
     # Apply TOML configuration (if provided). CLI arguments take precedence.
     # Note: We only fill values that are unset/empty on the CLI.
     if getattr(args, "config", None):
         cfg = load_toml_config(args.config)
+        detection_cfg = cfg.get('detection', {})
         defaults = config_defaults_from(cfg)
         for k, v in defaults.items():
             # Only backfill fields that are unset/empty from the CLI.
@@ -105,6 +109,14 @@ def main():
         runout_active_high=args.runout_active_high,
         runout_debounce_s=args.runout_debounce,
         jam_timeout_s=args.jam_timeout,
+        jam_timeout_adaptive=detection_cfg.get('jam_timeout_adaptive', False),
+        jam_timeout_min_s=getattr(args, "jam_timeout_min", 6.0),
+        jam_timeout_max_s=getattr(args, "jam_timeout_max", 18.0),
+        jam_timeout_k=getattr(args, "jam_timeout_k", 16.0),
+        jam_timeout_pps_floor=getattr(args, "jam_timeout_pps_floor", 0.3),
+        jam_timeout_ema_halflife_s=getattr(args, "jam_timeout_ema_halflife", 3.0),
+        arm_grace_pulses=getattr(args, "arm_grace_pulses", 0),
+        arm_grace_s=getattr(args, "arm_grace_s", 0.0),
         arm_min_pulses=args.arm_min_pulses,
         pause_gcode=args.pause_gcode,
         verbose=args.verbose,
@@ -130,6 +142,14 @@ def main():
             runout_active_high=args.runout_active_high,
             arm_min_pulses=args.arm_min_pulses,
             jam_timeout_s=args.jam_timeout,
+        jam_timeout_adaptive=detection_cfg.get('jam_timeout_adaptive', False),
+        jam_timeout_min_s=getattr(args, "jam_timeout_min", 6.0),
+        jam_timeout_max_s=getattr(args, "jam_timeout_max", 18.0),
+        jam_timeout_k=getattr(args, "jam_timeout_k", 16.0),
+        jam_timeout_pps_floor=getattr(args, "jam_timeout_pps_floor", 0.3),
+        jam_timeout_ema_halflife_s=getattr(args, "jam_timeout_ema_halflife", 3.0),
+        arm_grace_pulses=getattr(args, "arm_grace_pulses", 0),
+        arm_grace_s=getattr(args, "arm_grace_s", 0.0),
             pause_gcode=args.pause_gcode,
             verbose=args.verbose,
             control_socket=getattr(args, "control_socket", None),
@@ -168,4 +188,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -1,5 +1,7 @@
 import pytest
 
+from builtins import DummyGPIO
+
 
 class CapturingLogger:
     """Minimal logger that matches the monitor's .emit(event, **fields) contract."""
@@ -8,13 +10,6 @@ class CapturingLogger:
 
     def emit(self, event: str, **fields):
         self.events.append((event, fields))
-
-
-class DummyDigitalInputDevice:
-    """GPIO stub to avoid hardware access in unit tests."""
-    def __init__(self, *args, **kwargs):
-        self.when_activated = None
-        self.when_deactivated = None
 
 
 class DummySerial:
@@ -28,10 +23,8 @@ class DummySerial:
         pass
 
 
-def _make_monitor(monkeypatch, jam_timeout_s=1.0):
+def _make_monitor(monkeypatch, jam_timeout_s=1.0, **kwargs):
     m = load_module()
-    # Patch the GPIO DigitalInputDevice used by the monitor.
-    monkeypatch.setattr(m.monitor, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
 
     logger = CapturingLogger()
     state = m.MonitorState()
@@ -46,6 +39,8 @@ def _make_monitor(monkeypatch, jam_timeout_s=1.0):
         arm_min_pulses=12,  # ignored in marker-only arming model
         pause_gcode="M600",
         verbose=False,
+        gpio_factory=DummyGPIO,
+        **kwargs,
     )
     mon.attach_serial(DummySerial())
     return m, mon, logger
@@ -145,3 +140,71 @@ def test_stop_ignores_late_motion_callbacks(monkeypatch):
     assert mon.state.motion_pulses_total == before_total
     assert mon.state.motion_pulses_since_reset == before_since
     assert mon.state.last_pulse_ts == before_ts
+
+
+def test_post_arm_grace_gate_blocks_false_jam(monkeypatch):
+    """If configured, jam latching is suppressed right after (re)arm until pulses/time criteria are met."""
+    m, mon, logger = _make_monitor(
+        monkeypatch,
+        jam_timeout_s=1.0,
+        arm_grace_pulses=12,
+        arm_grace_s=12.0,
+    )
+    t = {"now": 1000.0}
+    monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
+
+    mon._handle_control_marker("filmon:arm")
+    assert mon.state.armed is True
+
+    # Advance beyond the base timeout, but still within grace window and with 0 pulses since arm.
+    t["now"] += 2.0
+    mon._maybe_jam()
+    assert mon.state.latched is False
+    assert mon._ser.writes == []
+
+    # Once the grace time elapses, jam detection can trigger.
+    t["now"] += 12.0
+    mon._maybe_jam()
+    assert mon.state.latched is True
+    assert any("M600" in w for w in mon._ser.writes)
+
+
+def test_adaptive_timeout_scales_with_pps(monkeypatch):
+    """Adaptive jam timeout should scale with recent pps and clamp when pps collapses."""
+    m, mon, logger = _make_monitor(
+        monkeypatch,
+        jam_timeout_s=8.0,
+        jam_timeout_adaptive=True,
+        jam_timeout_min_s=6.0,
+        jam_timeout_max_s=18.0,
+        jam_timeout_k=16.0,
+        jam_timeout_pps_floor=0.3,
+        jam_timeout_ema_halflife_s=0.0,  # make EMA track instantaneous pps for deterministic test
+        pulse_window_s=2.0,
+    )
+    t = {"now": 2000.0}
+    monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
+
+    mon._handle_control_marker("filmon:arm")
+
+    # Simulate pulses at ~2 pps over the 2s window => expected effective timeout ~ 16/2 = 8s.
+    for _ in range(4):
+        mon._on_motion_pulse()
+        t["now"] += 0.5
+
+    eff = mon._effective_jam_timeout_s(t["now"])
+    assert 7.0 <= eff <= 9.0
+
+    # After the window expires (pps->0), the effective timeout should clamp to jam_timeout_max_s.
+    t["now"] += 5.0
+    eff2 = mon._effective_jam_timeout_s(t["now"])
+    assert eff2 == pytest.approx(18.0, abs=0.01)
+
+    # With no pulses, jam should only trigger after the clamped max timeout.
+    t["now"] = mon.state.last_pulse_ts + 17.9
+    mon._maybe_jam()
+    assert mon.state.latched is False
+
+    t["now"] = mon.state.last_pulse_ts + 18.1
+    mon._maybe_jam()
+    assert mon.state.latched is True

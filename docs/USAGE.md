@@ -249,8 +249,48 @@ The table below is synced to the script’s `argparse` help strings.
 | Argument | Purpose | Default |
 |---------|---------|---------|
 | `--arm-min-pulses` | (Legacy/unused) Jam detection is marker-driven via `filmon:arm`. | `12` |
-| `--jam-timeout` | Seconds without motion pulses (after arming) before declaring a jam (default: 8.0). | `8.0` |
-| `--pause-gcode` | G-code to send when a jam/runout is detected (default: M600). | `M600` |
+| `--jam-timeout` | **Base** jam timeout: seconds without motion pulses (after arming) before declaring a jam. | `8.0` |
+| `--pause-gcode` | G-code to send when a jam/runout is detected. | `M600` |
+
+### Adaptive jam timeout (config-only)
+
+For prints with very slow or intermittent extrusion (common near end-of-print), a fixed `--jam-timeout` can cause false jams.
+You can enable an **adaptive** jam timeout that scales with the recent pulse rate (pps) and is clamped within bounds.
+
+Add to your config under `[detection]`:
+
+```toml
+# Enable adaptive jam timeout (pps-based)
+jam_timeout_adaptive = true
+
+# Clamp range for the effective timeout (seconds)
+jam_timeout_min = 6.0
+jam_timeout_max = 18.0
+
+# Scale factor: effective_timeout ≈ jam_timeout_k / max(pps_ema, jam_timeout_pps_floor)
+jam_timeout_k = 16.0
+jam_timeout_pps_floor = 0.3
+
+# EMA half-life (seconds) for smoothing pps
+jam_timeout_ema_halflife = 3.0
+```
+
+The monitor will include `pps_ema` and `jam_timeout_effective_s` in the heartbeat JSON.
+
+### Post-(re)arm grace period (config-only)
+
+To prevent an immediate false jam right after `filmon:arm` or a rearm action, you can configure a grace gate.
+Jam latching is suppressed until either condition is met:
+
+- at least `arm_grace_pulses` pulses have been observed since (re)arm, **or**
+- at least `arm_grace_s` seconds have elapsed since (re)arm
+
+Example:
+
+```toml
+arm_grace_pulses = 12
+arm_grace_s = 12.0
+```
 
 ### Diagnostics and safety
 
@@ -262,18 +302,6 @@ The table below is synced to the script’s `argparse` help strings.
 | `--json` | Emit structured JSON log events (one per line). | `False` |
 | `--no-json` | Disable JSON log output. | `False` |
 | `--no-banner` | Disable the startup banner. | `False` |
-| `--version` | Print version and exit. | `False` |
-| `--config` | Path to a TOML config file (CLI overrides config). | `` |
-| `--print-config` | Print the resolved configuration and exit. | `False` |
-
-Example (motion + optional runout):
-```
-bash
-python filament-monitor.py -p /dev/ttyACM0 \
-  --motion-gpio 26 \
-  --runout-enabled \
-  --runout-gpio 27
-```
 
 ## Installation
 

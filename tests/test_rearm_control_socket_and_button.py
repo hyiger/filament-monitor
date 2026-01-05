@@ -3,6 +3,8 @@ import socket
 import time
 import pytest
 
+from builtins import DummyGPIO
+
 
 class CapturingLogger:
     def __init__(self):
@@ -32,7 +34,6 @@ class DummySerial:
 
 def _make_monitor(monkeypatch, *, rearm_button_gpio=None):
     m = load_module()
-    monkeypatch.setattr(m.monitor, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
 
     logger = CapturingLogger()
     state = m.MonitorState()
@@ -54,6 +55,7 @@ def _make_monitor(monkeypatch, *, rearm_button_gpio=None):
         rearm_button_active_high=False,
         rearm_button_debounce_s=0.25,
         rearm_button_long_press_s=1.5,
+        gpio_factory=DummyGPIO,
     )
     mon._ser = DummySerial()
     return m, mon, logger
