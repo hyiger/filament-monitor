@@ -28,6 +28,7 @@ import signal
 import time
 
 def main():
+    detection_cfg = {}
     """CLI entry point. Parses args, configures the monitor, and starts the daemon."""
     ap = build_arg_parser()
     if len(sys.argv) == 1:
@@ -106,7 +107,7 @@ def main():
         runout_active_high=args.runout_active_high,
         runout_debounce_s=args.runout_debounce,
         jam_timeout_s=args.jam_timeout,
-        jam_timeout_adaptive=detection_detection_cfg.get('jam_timeout_adaptive', False),
+        jam_timeout_adaptive=detection_cfg.get('jam_timeout_adaptive', False),
         jam_timeout_min_s=getattr(args, "jam_timeout_min", 6.0),
         jam_timeout_max_s=getattr(args, "jam_timeout_max", 18.0),
         jam_timeout_k=getattr(args, "jam_timeout_k", 16.0),
@@ -139,7 +140,7 @@ def main():
             runout_active_high=args.runout_active_high,
             arm_min_pulses=args.arm_min_pulses,
             jam_timeout_s=args.jam_timeout,
-        jam_timeout_adaptive=detection_detection_cfg.get('jam_timeout_adaptive', False),
+        jam_timeout_adaptive=detection_cfg.get('jam_timeout_adaptive', False),
         jam_timeout_min_s=getattr(args, "jam_timeout_min", 6.0),
         jam_timeout_max_s=getattr(args, "jam_timeout_max", 18.0),
         jam_timeout_k=getattr(args, "jam_timeout_k", 16.0),
