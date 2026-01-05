@@ -5,6 +5,7 @@ import collections
 import queue
 import socket
 import threading
+import math
 import time
 from typing import Optional
 
@@ -41,6 +42,16 @@ class FilamentMonitor:
         rearm_button_active_high: bool = False,
         rearm_button_debounce_s: float = 0.25,
         rearm_button_long_press_s: float = 1.5,
+        # Adaptive jam timeout (optional; config-only)
+        jam_timeout_adaptive: bool = False,
+        jam_timeout_min_s: float = 6.0,
+        jam_timeout_max_s: float = 18.0,
+        jam_timeout_k: float = 16.0,
+        jam_timeout_pps_floor: float = 0.3,
+        jam_timeout_ema_halflife_s: float = 3.0,
+        # Post-(re)arm grace period (optional; config-only)
+        arm_grace_pulses: int = 0,
+        arm_grace_s: float = 0.0,
     ):
         """
         Initialize the monitor.
@@ -68,6 +79,17 @@ class FilamentMonitor:
         self._next_hb_ts = now_s() + self._breadcrumb_interval_s
         self.jam_timeout_s = jam_timeout_s
         self.arm_min_pulses = arm_min_pulses
+        self.jam_timeout_adaptive = bool(jam_timeout_adaptive)
+        self.jam_timeout_min_s = float(jam_timeout_min_s)
+        self.jam_timeout_max_s = float(jam_timeout_max_s)
+        self.jam_timeout_k = float(jam_timeout_k)
+        self.jam_timeout_pps_floor = float(jam_timeout_pps_floor)
+        self.jam_timeout_ema_halflife_s = float(jam_timeout_ema_halflife_s)
+        self.arm_grace_pulses = int(arm_grace_pulses)
+        self.arm_grace_s = float(arm_grace_s)
+
+        self._pps_ema = 0.0
+        self._pps_ema_last_ts = 0.0
         self.pause_gcode = pause_gcode.strip()
 
         self.motion = DigitalInputDevice(motion_gpio, pull_up=True)
@@ -206,9 +228,49 @@ class FilamentMonitor:
             return 0.0
         return float(len(self._pulse_times)) / float(self._pulse_window_s)
 
+    def _update_pps_ema(self, now: float) -> float:
+        """Update and return an EMA of pulses-per-second.
+
+        The EMA is used for adaptive jam timeout. If jam_timeout_ema_halflife_s <= 0,
+        the EMA tracks the instantaneous pps.
+        """
+        pps_now = self._pps(now)
+        if self._pps_ema_last_ts <= 0.0:
+            self._pps_ema = pps_now
+            self._pps_ema_last_ts = now
+            return self._pps_ema
+
+        dt = max(0.0, now - self._pps_ema_last_ts)
+        self._pps_ema_last_ts = now
+
+        hl = float(self.jam_timeout_ema_halflife_s)
+        if hl <= 0.0 or dt <= 0.0:
+            self._pps_ema = pps_now
+            return self._pps_ema
+
+        tau = hl / math.log(2.0)
+        alpha = 1.0 - math.exp(-dt / tau)
+        self._pps_ema = (1.0 - alpha) * self._pps_ema + alpha * pps_now
+        return self._pps_ema
+
+    def _effective_jam_timeout_s(self, now: float) -> float:
+        """Return the effective jam timeout (seconds), possibly adaptive."""
+        if not self.jam_timeout_adaptive:
+            return float(self.jam_timeout_s)
+
+        pps_ema = self._update_pps_ema(now)
+        denom = max(float(self.jam_timeout_pps_floor), float(pps_ema))
+        if denom <= 0.0:
+            return float(self.jam_timeout_max_s)
+
+        t = float(self.jam_timeout_k) / denom
+        return max(float(self.jam_timeout_min_s), min(float(self.jam_timeout_max_s), t))
+
     def _reset_pulse_tracking(self):
         """Reset pulse-rate tracking and stall breadcrumb state."""
         self._pulse_times.clear()
+        self._pps_ema = 0.0
+        self._pps_ema_last_ts = 0.0
         self._stall_next_idx = 0
         self._next_hb_ts = now_s() + self._breadcrumb_interval_s
 
@@ -227,6 +289,8 @@ class FilamentMonitor:
                 runout=int(self.state.runout_asserted),
                 dt_since_pulse=(round(dt, 3) if dt is not None else None),
                 pps=round(self._pps(now), 3),
+                pps_ema=round(self._update_pps_ema(now), 3),
+                jam_timeout_effective_s=round(self._effective_jam_timeout_s(now), 3),
                 pulses_reset=self.state.motion_pulses_since_reset,
                 pulses_arm=self.state.motion_pulses_since_arm,
             )
@@ -476,10 +540,24 @@ class FilamentMonitor:
     def _maybe_jam(self):
         """Evaluate jam condition based on pulse timing and thresholds.
 
-        This is called periodically by the main loop. Jams can only trigger when explicitly armed and not latched."""
+        This is called periodically by the main loop. Jams can only trigger when explicitly armed and not latched.
+
+        The jam timeout may be adaptive (pps-based) when enabled. Additionally, an optional post-(re)arm grace
+        period can be configured to reduce false positives during sparse extrusion (e.g., tiny endgame layers)."""
         if not self.state.enabled or self.state.latched or not self.state.armed:
             return
-        if now_s() - self.state.last_pulse_ts >= self.jam_timeout_s:
+
+        now = now_s()
+
+        # Optional post-(re)arm grace gate: do not allow jam latch until the grace criteria are met.
+        if (self.arm_grace_pulses > 0 or self.arm_grace_s > 0.0) and self.state.arm_ts:
+            pulses_ok = self.state.motion_pulses_since_arm >= self.arm_grace_pulses if self.arm_grace_pulses > 0 else True
+            time_ok = (now - self.state.arm_ts) >= self.arm_grace_s if self.arm_grace_s > 0.0 else True
+            if not (pulses_ok or time_ok):
+                return
+
+        timeout_s = self._effective_jam_timeout_s(now)
+        if now - self.state.last_pulse_ts >= timeout_s:
             self._trigger_pause("jam")
     def _handle_control_marker(self, line):
         """Handle a decoded control marker.
