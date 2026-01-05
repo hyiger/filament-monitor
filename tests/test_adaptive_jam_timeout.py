@@ -8,7 +8,7 @@ from filmon.logging import JsonLogger
 
 def _make_monitor(adaptive: bool):
     state = MonitorState()
-    logger = JsonLogger()
+    logger = JsonLogger(enable_json=False)
     mon = FilamentMonitor(
         state=state,
         logger=logger,
@@ -43,7 +43,7 @@ def test_adaptive_timeout_exceeds_fixed_when_pps_low():
     mon._pps_ema = 0.2
     mon._pps_ema_last_ts = now
 
-    eff = mon.jam_timeout_effective_s(now)
+    eff = mon._effective_jam_timeout_s(now)
     assert eff > 8.0
     assert eff <= 18.0
 
@@ -54,5 +54,5 @@ def test_fixed_timeout_is_constant():
     mon._pps_ema = 0.01
     mon._pps_ema_last_ts = now
 
-    eff = mon.jam_timeout_effective_s(now)
+    eff = mon._effective_jam_timeout_s(now)
     assert eff == pytest.approx(8.0)
