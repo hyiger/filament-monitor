@@ -43,6 +43,7 @@ class FilamentMonitor:
         rearm_button_debounce_s: float = 0.25,
         rearm_button_long_press_s: float = 1.5,
         # Adaptive jam timeout (optional; config-only)
+        self.jam_timeout_adaptive = jam_timeout_adaptive
         jam_timeout_adaptive: bool = False,
         jam_timeout_min_s: float = 6.0,
         jam_timeout_max_s: float = 18.0,
