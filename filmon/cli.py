@@ -3,6 +3,11 @@ from __future__ import annotations
 import sys
 import json
 
+def _cfg_or_arg(cfg_val, arg_val):
+    """Return cfg_val unless arg_val is explicitly set (not None)."""
+    return cfg_val if arg_val is None else arg_val
+
+
 try:
     import serial  # pyserial
 except Exception:  # pragma: no cover
