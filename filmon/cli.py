@@ -28,7 +28,6 @@ import signal
 import time
 
 def main():
-    detection_cfg = {}
     """CLI entry point. Parses args, configures the monitor, and starts the daemon."""
     ap = build_arg_parser()
     if len(sys.argv) == 1:
@@ -37,10 +36,13 @@ def main():
 
     args = ap.parse_args()
 
+    detection_cfg = {}
+
     # Apply TOML configuration (if provided). CLI arguments take precedence.
     # Note: We only fill values that are unset/empty on the CLI.
     if getattr(args, "config", None):
         cfg = load_toml_config(args.config)
+        detection_cfg = cfg.get('detection', {})
         defaults = config_defaults_from(cfg)
         for k, v in defaults.items():
             # Only backfill fields that are unset/empty from the CLI.
