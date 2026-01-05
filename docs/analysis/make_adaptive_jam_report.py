@@ -292,10 +292,121 @@ def _build_pdf(
     doc.build(story)
 
 
+
+def _write_markdown(
+    out_md: Path,
+    pps_plot: Path,
+    timeout_plot: Path,
+    dt_plot: Optional[Path],
+    data_source_note: str,
+    assets_dir: Path,
+) -> None:
+    """
+    Write a GitHub-renderable Markdown report.
+
+    Notes:
+    - Uses standard Markdown tables.
+    - Embeds plots as relative image links into assets_dir.
+    """
+    # Compute relative paths from the markdown file location
+    md_dir = out_md.parent.resolve()
+    def rel(p: Path) -> str:
+        try:
+            return str(p.resolve().relative_to(md_dir)).replace("\\\\", "/")
+        except Exception:
+            # fall back: use assets_dir-relative
+            return str(p).replace("\\\\", "/")
+
+    lines: List[str] = []
+    lines.append("# Adaptive Jam Timeout and pps_ema")
+    lines.append("")
+    lines.append(data_source_note.replace("<b>", "**").replace("</b>", "**"))
+    lines.append("")
+    lines.append("## Variable definitions")
+    lines.append("")
+    lines.append("| Symbol | Code name | Units | Meaning |")
+    lines.append("|---|---|---:|---|")
+    rows = [
+        ("N", "`len(self._pulse_times)`", "pulses", "Pulse count in the sliding window"),
+        ("T", "`self._pulse_window_s`", "s", "Sliding pulse window duration"),
+        ("pps", "`self._pps(now)`", "pulses/s", "Instantaneous pulse rate N / T"),
+        ("ppsₑₘₐ", "`self._pps_ema`", "pulses/s", "Exponential moving average of pps"),
+        ("Δt", "`dt = now - self._pps_ema_last_ts`", "s", "Time since last EMA update"),
+        ("H", "`jam_timeout_ema_halflife_s`", "s", "Half-life used to set EMA aggressiveness"),
+        ("τ", "`tau = H / ln(2)`", "s", "EMA time constant from half-life"),
+        ("α", "`alpha = 1 - exp(-Δt/τ)`", "–", "EMA update gain"),
+        ("K", "`jam_timeout_k`", "s·pulses", "Scale factor in timeout ≈ K / pps_ema"),
+        ("pps_floor", "`jam_timeout_pps_floor`", "pulses/s", "Minimum denominator to avoid blow-up"),
+        ("T_min", "`jam_timeout_min_s`", "s", "Lower clamp on effective timeout"),
+        ("T_max", "`jam_timeout_max_s`", "s", "Upper clamp on effective timeout"),
+        ("T_jam_eff", "`jam_timeout_effective_s`", "s", "Effective jam timeout after scaling+clamp"),
+        ("N_grace", "`arm_grace_pulses`", "pulses", "Suppress jam until ≥ N_grace pulses since (re)arm"),
+        ("G", "`arm_grace_s`", "s", "Suppress jam until ≥ G seconds since (re)arm"),
+    ]
+    for sym, code, units, meaning in rows:
+        lines.append(f"| {sym} | {code} | {units} | {meaning} |")
+
+    lines.append("")
+    lines.append("## Mathematical model")
+    lines.append("")
+    lines.append("### Raw pulse rate")
+    lines.append("")
+    lines.append("$$\\mathrm{pps}(t) = \\frac{N}{T}$$")
+    lines.append("")
+    lines.append("### EMA update")
+    lines.append("")
+    lines.append("$$\\mathrm{pps}_{\\mathrm{ema}}(t) = (1-\\alpha)\\,\\mathrm{pps}_{\\mathrm{ema}}(t-\\Delta t) + \\alpha\\,\\mathrm{pps}(t)$$")
+    lines.append("")
+    lines.append("### Half-life parameterization")
+    lines.append("")
+    lines.append("Define an exponential decay weight:")
+    lines.append("")
+    lines.append("$$w(t)=e^{-t/\\tau}$$")
+    lines.append("")
+    lines.append("Half-life $H$ means $w(H)=1/2$:")
+    lines.append("")
+    lines.append("$$\\frac{1}{2} = e^{-H/\\tau} \\;\\Rightarrow\\; \\tau = \\frac{H}{\\ln 2}$$")
+    lines.append("")
+    lines.append("Discrete-time EMA gain:")
+    lines.append("")
+    lines.append("$$\\alpha = 1 - e^{-\\Delta t/\\tau} = 1 - e^{-(\\ln 2)\\,\\Delta t/H}$$")
+    lines.append("")
+    lines.append("### Adaptive jam timeout")
+    lines.append("")
+    lines.append("$$T_{\\mathrm{jam}}^{\\mathrm{eff}} = \\mathrm{clamp}(T_{\\min}, T_{\\max}, \\; K / \\max(\\mathrm{pps}_{\\mathrm{ema}}, \\mathrm{pps}_{\\mathrm{floor}}))$$")
+    lines.append("")
+    lines.append("## Plots")
+    lines.append("")
+    lines.append(f"### pps vs pps_ema")
+    lines.append("")
+    lines.append(f"![pps vs pps_ema]({rel(pps_plot)})")
+    lines.append("")
+    lines.append("### Effective jam timeout")
+    lines.append("")
+    lines.append(f"![effective jam timeout]({rel(timeout_plot)})")
+
+    if dt_plot is not None:
+        lines.append("")
+        lines.append("### dt_since_pulse (diagnostic)")
+        lines.append("")
+        lines.append(f"![dt_since_pulse]({rel(dt_plot)})")
+
+    lines.append("")
+    lines.append("## Appendix: where ln(2) comes from")
+    lines.append("")
+    lines.append("Half-life means the remaining weight is 1/2 after $H$ seconds for an exponential decay $w(t)=e^{-t/\\tau}$.")
+    lines.append("Setting $w(H)=1/2$ gives $1/2=e^{-H/\\tau}$. Taking natural logs yields $\\ln(1/2)=-H/\\tau$.")
+    lines.append("Since $\\ln(1/2)=-\\ln 2$, we obtain $\\tau=H/\\ln 2$.")
+    lines.append("")
+
+    out_md.write_text("\\n".join(lines), encoding="utf-8")
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--jsonl", type=Path, default=None, help="Monitor JSONL file (uses hb events for plots).")
     ap.add_argument("--out", type=Path, default=Path("Adaptive_Jam_Timeout_Report.pdf"), help="Output PDF path.")
+    ap.add_argument("--md-out", type=Path, default=Path("Adaptive_Jam_Timeout_Report.md"), help="Output Markdown path.")
+    ap.add_argument("--assets-dir", type=Path, default=Path(".report_artifacts"), help="Directory for generated plot images.")
     args = ap.parse_args()
 
     if args.jsonl is not None:
@@ -307,10 +418,12 @@ def main() -> None:
         note = "This report uses a synthetic example signal (no --jsonl provided)."
         prefix = "Synthetic example"
 
-    out_dir = Path(".report_artifacts")
+    out_dir = args.assets_dir
     p1, p2, p3 = _plot_series(series, out_dir, prefix)
     _build_pdf(args.out, p1, p2, p3, note)
+    _write_markdown(args.md_out, p1, p2, p3, note, out_dir)
     print(f"Wrote {args.out}")
+    print(f"Wrote {args.md_out}")
 
 
 if __name__ == "__main__":  # pragma: no cover
