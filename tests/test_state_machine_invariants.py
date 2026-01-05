@@ -1,5 +1,7 @@
 import pytest
 
+from builtins import DummyGPIO
+
 
 class CapturingLogger:
     """Minimal logger that matches the monitor's .emit(event, **fields) contract."""
@@ -8,13 +10,6 @@ class CapturingLogger:
 
     def emit(self, event: str, **fields):
         self.events.append((event, fields))
-
-
-class DummyDigitalInputDevice:
-    """GPIO stub to avoid hardware access in unit tests."""
-    def __init__(self, *args, **kwargs):
-        self.when_activated = None
-        self.when_deactivated = None
 
 
 class DummySerial:
@@ -30,8 +25,6 @@ class DummySerial:
 
 def _make_monitor(monkeypatch, jam_timeout_s=1.0, **kwargs):
     m = load_module()
-    # Patch the GPIO DigitalInputDevice used by the monitor.
-    monkeypatch.setattr(m.monitor, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
 
     logger = CapturingLogger()
     state = m.MonitorState()
@@ -46,6 +39,7 @@ def _make_monitor(monkeypatch, jam_timeout_s=1.0, **kwargs):
         arm_min_pulses=12,  # ignored in marker-only arming model
         pause_gcode="M600",
         verbose=False,
+        gpio_factory=DummyGPIO,
         **kwargs,
     )
     mon.attach_serial(DummySerial())

@@ -52,6 +52,9 @@ class FilamentMonitor:
         # Post-(re)arm grace period (optional; config-only)
         arm_grace_pulses: int = 0,
         arm_grace_s: float = 0.0,
+        # Testing hook: provide a GPIO module/factory with a DigitalInputDevice
+        # attribute to avoid touching real hardware in unit tests.
+        gpio_factory=None,
     ):
         """
         Initialize the monitor.
@@ -62,6 +65,12 @@ class FilamentMonitor:
         self.state = state
         self.logger = logger
         self.verbose = bool(verbose)
+
+        # Allow tests to provide a stub GPIO factory (with DigitalInputDevice)
+        # so the monitor can be constructed without claiming real pins.
+        self._DigitalInputDevice = getattr(gpio_factory, "DigitalInputDevice", None) if gpio_factory else None
+        if self._DigitalInputDevice is None:
+            self._DigitalInputDevice = DigitalInputDevice
 
 
         # Pulse breadcrumb / rate tracking
@@ -92,7 +101,7 @@ class FilamentMonitor:
         self._pps_ema_last_ts = 0.0
         self.pause_gcode = pause_gcode.strip()
 
-        self.motion = DigitalInputDevice(motion_gpio, pull_up=True)
+        self.motion = self._DigitalInputDevice(motion_gpio, pull_up=True)
         self.motion.when_deactivated = self._on_motion_pulse
 
         self.runout = None
@@ -104,7 +113,7 @@ class FilamentMonitor:
         self._last_runout_edge = 0.0
 
         if runout_gpio is not None:
-            self.runout = DigitalInputDevice(runout_gpio, pull_up=True)
+            self.runout = self._DigitalInputDevice(runout_gpio, pull_up=True)
             if runout_active_high:
                 self.runout.when_activated   = self._on_runout_asserted
                 self.runout.when_deactivated = self._on_runout_cleared
@@ -128,7 +137,7 @@ class FilamentMonitor:
             # Active-low (recommended): enable pull-up, press shorts to GND.
             # Active-high: enable pull-down (pull_up=False), press drives pin high.
             pull_up = not self.rearm_button_active_high
-            self.rearm_button = DigitalInputDevice(rearm_button_gpio, pull_up=pull_up)
+            self.rearm_button = self._DigitalInputDevice(rearm_button_gpio, pull_up=pull_up)
 
             if self.rearm_button_active_high:
                 # press = activated (high), release = deactivated

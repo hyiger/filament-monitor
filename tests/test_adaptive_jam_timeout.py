@@ -5,6 +5,8 @@ from filmon.monitor import FilamentMonitor
 from filmon.state import MonitorState
 from filmon.logging import JsonLogger
 
+from builtins import DummyGPIO
+
 
 def _make_monitor(adaptive: bool):
     state = MonitorState()
@@ -25,6 +27,7 @@ def _make_monitor(adaptive: bool):
         jam_timeout_k=16.0,
         jam_timeout_pps_floor=0.3,
         jam_timeout_ema_halflife_s=3.0,
+        gpio_factory=DummyGPIO,
     )
     mon.enabled = True
     mon.armed = True

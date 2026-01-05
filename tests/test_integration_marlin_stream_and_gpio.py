@@ -5,6 +5,8 @@ from typing import List
 
 import pytest
 
+from builtins import DummyGPIO
+
 
 class FakeSerial:
     """Minimal serial-like object capturing writes from the monitor."""
@@ -95,7 +97,7 @@ def test_marlin_like_serial_stream_gpio_activity_rearm_then_runout(monkeypatch):
     """
     m = load_module()  # from tests/conftest.py
 
-    monkeypatch.setattr(m.monitor, "DigitalInputDevice", DummyDigitalInputDevice, raising=True)
+    # Avoid touching real GPIO in tests; use the stub factory.
 
     repo_root = Path(__file__).resolve().parents[1]
     log_text = (repo_root / "tests" / "data" / "monitor.log").read_text(errors="replace")
@@ -127,6 +129,7 @@ def test_marlin_like_serial_stream_gpio_activity_rearm_then_runout(monkeypatch):
         rearm_button_active_high=False,
         rearm_button_debounce_s=0.05,
         rearm_button_long_press_s=0.5,
+        gpio_factory=DummyGPIO,
     )
 
     fake_ser = FakeSerial()

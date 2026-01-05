@@ -1,5 +1,6 @@
 def test_control_markers_enable_arm_unarm_disable_reset():
     m = load_module()
+    from builtins import DummyGPIO
 
     class CapturingLogger(m.JsonLogger):
         def __init__(self):
@@ -21,6 +22,7 @@ def test_control_markers_enable_arm_unarm_disable_reset():
         arm_min_pulses=12,
         pause_gcode="M600",
         verbose=False,
+        gpio_factory=DummyGPIO,
     )
 
     mon._handle_control_marker("M118 A1 filmon:enable")
