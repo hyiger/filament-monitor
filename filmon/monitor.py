@@ -356,7 +356,10 @@ class FilamentMonitor:
         if not (self.state.enabled and self.state.armed) or self.state.latched:
             return
 
-        if not self._stall_thresholds_s:
+        # Thresholds are stored as parsed items in `_stall_thresholds`.
+        # (Older versions used `_stall_thresholds_s`; keep this check aligned
+        # with the actual attribute name to avoid crashing the monitor thread.)
+        if not self._stall_thresholds:
             return
 
         dt = now - self.state.last_pulse_ts
