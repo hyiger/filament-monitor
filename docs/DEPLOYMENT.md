@@ -100,3 +100,13 @@ At very low volumetric flow rates, legitimate extrusion may advance **less than 
 - Marker-based arming is the intended mitigation
 
 Breadcrumb logging exists to measure these limits empirically.
+
+## Control socket path (`/run/filmon`)
+
+The provided systemd service uses:
+
+- `RuntimeDirectory=filmon` (systemd creates `/run/filmon` at startup)
+- `control_socket=/run/filmon/filmon.sock`
+
+**If you run the monitor manually (not via systemd):** `/run/filmon` may not exist and your user may not have permission to create it. In that case, set `control_socket` to a path under `/tmp` (e.g. `/tmp/filmon.sock`) or create the directory as root.
+

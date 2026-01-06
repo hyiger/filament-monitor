@@ -441,3 +441,31 @@ Run integration tests with:
 ```bash
 pytest -m integration
 ```
+
+## Arming vs runout
+
+- **Jam detection** is only evaluated while monitoring is **enabled and armed**.
+- **Runout detection** is evaluated whenever monitoring is **enabled** (it does **not** require arm).
+
+This mirrors practical usage: runout is a simple presence switch, while jam detection needs to be armed once extrusion is underway.
+
+## Control marker format
+
+Markers are parsed as **exact commands**. Use one of:
+
+- `filmon:enable`
+- `filmon:arm`
+- `filmon:unarm`
+- `filmon:disable`
+- `filmon:reset`
+
+Avoid substring/suffixed forms (e.g. `filmon:rearm`) — they are not recognized.
+
+## End-of-print handling
+
+Include `filmon:disable` in your slicer end G-code to prevent false pauses during cooldown/unload/after-print phases:
+
+```gcode
+M118 A1 filmon:disable
+```
+

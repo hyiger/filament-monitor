@@ -56,7 +56,9 @@ no_banner = false
 json = false
 breadcrumb_interval = 2.0
 pulse_window = 2.0
-stall_thresholds = "3,6"
+# Stall breadcrumbs (debug/tuning): comma-separated seconds (e.g. "3,6")
+# or fractions of the effective jam timeout with "x"/"%" suffix (e.g. "0.5x,75%").
+stall_thresholds = "0.5x,0.75x"
 
 [control]
 # Local UNIX control socket used by filmonctl (useful when the daemon owns the printer serial port).

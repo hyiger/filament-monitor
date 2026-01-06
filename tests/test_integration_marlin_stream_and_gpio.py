@@ -201,6 +201,22 @@ def test_marlin_like_serial_stream_gpio_activity_rearm_then_runout(monkeypatch):
         mon._maybe_jam()
     assert b"".join(fake_ser.writes).count(b"M600") == 1
 
+    # disable => detection off (no runout/jam actions)
+    mon._handle_control_marker("// filmon:disable")
+    assert mon.state.enabled is False
+    assert mon.state.armed is False
+
+    # runout asserted while disabled => no pause
+    t["now"] += 0.1
+    mon._on_runout_asserted()
+    assert b"".join(fake_ser.writes).count(b"M600") == 1
+
+    # re-enable and arm for the rest of the test
+    mon._handle_control_marker("// filmon:enable")
+    mon._handle_control_marker("// filmon:arm")
+    assert mon.state.enabled is True
+    assert mon.state.armed is True
+
     # runout asserted
     t["now"] += 0.1
     mon._on_runout_asserted()
