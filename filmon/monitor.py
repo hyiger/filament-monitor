@@ -7,6 +7,7 @@ import socket
 import threading
 import math
 import time
+import re
 from typing import Optional
 
 from .gpio import DigitalInputDevice
@@ -77,13 +78,30 @@ class FilamentMonitor:
         self._pulse_times = collections.deque()  # monotonic timestamps of recent pulses
         self._pulse_window_s = float(pulse_window_s)
         self._breadcrumb_interval_s = float(breadcrumb_interval_s)
-        # thresholds (seconds since last pulse) at which we emit 'stall' breadcrumbs while armed
-        self._stall_thresholds_s = []
+        # thresholds at which we emit 'stall' breadcrumbs while armed.
+        #
+        # Syntax: comma-separated list. Each item is either:
+        #   - seconds (e.g. "3", "6")
+        #   - a fraction of the *effective* jam timeout, with an 'x' suffix (e.g. "0.5x")
+        #   - a percentage of the effective jam timeout, with a '%' suffix (e.g. "50%")
+        #
+        # This lets stall breadcrumbs scale with adaptive timeouts, reducing noise on sparse prints.
+        self._stall_thresholds = []  # list[tuple[str,float]] where kind in {"sec","frac"}
         try:
             if stall_thresholds_s:
-                self._stall_thresholds_s = sorted({float(x.strip()) for x in str(stall_thresholds_s).split(",") if x.strip()})
+                raw_items = [x.strip() for x in str(stall_thresholds_s).split(",") if x.strip()]
+                parsed = []
+                for item in raw_items:
+                    if item.endswith("x"):
+                        parsed.append(("frac", float(item[:-1])))
+                    elif item.endswith("%"):
+                        parsed.append(("frac", float(item[:-1]) / 100.0))
+                    else:
+                        parsed.append(("sec", float(item)))
+                # Deduplicate (kind,value) pairs and sort for stable progression.
+                self._stall_thresholds = sorted(set(parsed), key=lambda t: (t[0], t[1]))
         except Exception:
-            self._stall_thresholds_s = [3.0, 6.0]
+            self._stall_thresholds = [("sec", 3.0), ("sec", 6.0)]
         self._stall_next_idx = 0
         self._next_hb_ts = now_s() + self._breadcrumb_interval_s
         self.jam_timeout_s = jam_timeout_s
@@ -159,6 +177,11 @@ class FilamentMonitor:
         self._control_thread = None
         self._control_stop_evt = threading.Event()
         self._control_sock_path: Optional[str] = None
+
+        # Strict control marker parsing.
+        # Require whole-command matches (word boundary) to avoid substring
+        # collisions (e.g. "filmon:rearm" must NOT match "filmon:arm").
+        self._control_re = re.compile(r"\b(filmon:(?:reset|disable|unarm|arm|enable))\b", re.IGNORECASE)
 
 
     def _on_rearm_button_press(self):
@@ -252,11 +275,19 @@ class FilamentMonitor:
             self._pps_ema_last_ts = now
             return self._pps_ema
 
-        dt = max(0.0, now - self._pps_ema_last_ts)
+        dt = now - self._pps_ema_last_ts
+
+        # If multiple callers update within the same tick (dt <= 0), do not
+        # overwrite the EMA with the instantaneous value; that defeats
+        # smoothing and can make adaptive timeouts noisy.
+        if dt <= 0.0:
+            return self._pps_ema
+
         self._pps_ema_last_ts = now
 
         hl = float(self.jam_timeout_ema_halflife_s)
-        if hl <= 0.0 or dt <= 0.0:
+        if hl <= 0.0:
+            # No smoothing requested: track instantaneous pps.
             self._pps_ema = pps_now
             return self._pps_ema
 
@@ -271,6 +302,14 @@ class FilamentMonitor:
             return float(self.jam_timeout_s)
 
         pps_ema = self._update_pps_ema(now)
+        return self._effective_jam_timeout_s_from_pps_ema(pps_ema)
+
+    def _effective_jam_timeout_s_from_pps_ema(self, pps_ema: float) -> float:
+        """Return the effective jam timeout (seconds) from a precomputed EMA.
+
+        This avoids double-updating the EMA when callers want to log both
+        pps_ema and the derived timeout in the same tick.
+        """
         denom = max(float(self.jam_timeout_pps_floor), float(pps_ema))
         if denom <= 0.0:
             return float(self.jam_timeout_max_s)
@@ -293,6 +332,7 @@ class FilamentMonitor:
         # Heartbeat snapshot (enabled only, to avoid noise when fully off)
         if self._breadcrumb_interval_s > 0 and self.state.enabled and now >= self._next_hb_ts:
             dt = now - self.state.last_pulse_ts if self.state.last_pulse_ts else None
+            pps_ema = self._update_pps_ema(now)
             self.logger.emit(
                 "hb",
                 enabled=int(self.state.enabled),
@@ -301,8 +341,12 @@ class FilamentMonitor:
                 runout=int(self.state.runout_asserted),
                 dt_since_pulse=(round(dt, 3) if dt is not None else None),
                 pps=round(self._pps(now), 3),
-                pps_ema=round(self._update_pps_ema(now), 3),
-                jam_timeout_effective_s=round(self._effective_jam_timeout_s(now), 3),
+                pps_ema=round(pps_ema, 3),
+                jam_timeout_effective_s=(
+                    round(self._effective_jam_timeout_s_from_pps_ema(pps_ema), 3)
+                    if self.jam_timeout_adaptive
+                    else round(float(self.jam_timeout_s), 3)
+                ),
                 pulses_reset=self.state.motion_pulses_since_reset,
                 pulses_arm=self.state.motion_pulses_since_arm,
             )
@@ -316,16 +360,41 @@ class FilamentMonitor:
             return
 
         dt = now - self.state.last_pulse_ts
-        while self._stall_next_idx < len(self._stall_thresholds_s) and dt >= self._stall_thresholds_s[self._stall_next_idx]:
-            thr = self._stall_thresholds_s[self._stall_next_idx]
+
+        # Compute the effective jam timeout *without* mutating EMA state.  Stall breadcrumbs
+        # are for operator visibility and should not influence the adaptive timeout estimator.
+        if self.jam_timeout_adaptive:
+            pps_ema = float(self._pps_ema)
+            pps = max(float(self.jam_timeout_pps_floor), pps_ema)
+            jam_eff = max(float(self.jam_timeout_min_s), min(float(self.jam_timeout_max_s), float(self.jam_timeout_k) / pps))
+        else:
+            pps_ema = float(self._pps_ema)
+            jam_eff = float(self.jam_timeout_s)
+
+        thr_items = []
+        for kind, val in self._stall_thresholds:
+            if kind == "frac":
+                thr_s = float(val) * jam_eff
+            else:
+                thr_s = float(val)
+            thr_items.append((thr_s, kind, float(val)))
+        thr_items.sort(key=lambda t: t[0])
+
+        while self._stall_next_idx < len(thr_items) and dt >= thr_items[self._stall_next_idx][0]:
+            thr_s, kind, val = thr_items[self._stall_next_idx]
             self.logger.emit(
                 "stall",
                 dt_since_pulse=round(dt, 3),
-                threshold_s=thr,
+                threshold_s=round(float(thr_s), 3),
+                threshold_kind=kind,
+                threshold_raw=val,
+                jam_timeout_effective_s=round(float(jam_eff), 3),
                 pps=round(self._pps(now), 3),
+                pps_ema=round(float(pps_ema), 3),
                 pulses_arm=self.state.motion_pulses_since_arm,
             )
             self._stall_next_idx += 1
+
 
     def _debounced(self) -> bool:
         """Return True if the runout input change passes debounce filtering."""
@@ -584,10 +653,13 @@ class FilamentMonitor:
             filmon:unarm    - keep enabled but disarm detection
             filmon:disable  - disable monitoring
         """
-        low = line.lower()
+        low = str(line).lower()
+        cmds = set(self._control_re.findall(low))
+        if not cmds:
+            return
 
         # NOTE: reset always wins.
-        if CONTROL_RESET in low:
+        if CONTROL_RESET in cmds:
             self.state.enabled = False
             self.state.armed = False
             self.state.latched = False
@@ -602,19 +674,19 @@ class FilamentMonitor:
 
         # Ignore state transitions while latched except disable/reset.
         if self.state.latched:
-            if CONTROL_DISABLE in low:
+            if CONTROL_DISABLE in cmds:
                 self.state.enabled = False
                 self.state.armed = False
                 self.logger.emit("disabled")
             return
 
-        if CONTROL_DISABLE in low:
+        if CONTROL_DISABLE in cmds:
             self.state.enabled = False
             self.state.armed = False
             self.logger.emit("disabled")
             return
 
-        if CONTROL_UNARM in low:
+        if CONTROL_UNARM in cmds:
             # Idempotent: unarming should not reset counters.
             self.state.enabled = True
             self.state.armed = False
@@ -622,7 +694,7 @@ class FilamentMonitor:
             self.logger.emit("unarmed")
             return
 
-        if CONTROL_ARM in low:
+        if CONTROL_ARM in cmds:
             # Arm implies enabled. Start timeout reference at arm time to avoid an immediate jam.
             self.state.enabled = True
             self.state.armed = True
@@ -633,7 +705,7 @@ class FilamentMonitor:
             self.logger.emit("armed")
             return
 
-        if CONTROL_ENABLE in low:
+        if CONTROL_ENABLE in cmds:
             # Enable only; never arms automatically. Idempotent and does not reset counters.
             if self.state.enabled and not self.state.armed:
                 self.logger.emit("enabled")
