@@ -8,6 +8,9 @@ A Raspberry Pi daemon that monitors **filament motion pulses** and an optional *
 > but the project is still gathering real-world feedback. Expect conservative defaults and incremental refinements.
 
 This project is intended for **Marlin-based firmware**, including **Prusa firmware variants**.
+
+The project defaults are chosen to work with a [BTT SFS V2.0 Smart Filament Sensor](https://biqu.equipment/products/btt-sfs-v2-0-smart-filament-sensor?gad_source=1&gad_campaignid=19101072959&gbraid=0AAAAAoLyodXwvW3tuE564PCAPh0SMCNJi&gclid=Cj0KCQiAsY3LBhCwARIsAF6O6Xi2HYIULPzggB0b2J_zHbLu9XPRrEJcX2Yf-u7BhSGYuc42Vso_4ocaAvCYEALw_wcB)
+
 ### Documentation
 - [Usage](docs/USAGE.md)
 - [Marlin / G-code Integration](docs/INTEGRATION.md)
