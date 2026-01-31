@@ -569,6 +569,7 @@ class FilamentMonitor:
         self._send_gcode(self.pause_gcode)
 
         # Notify (best-effort).
+        # Notify (best-effort).
         if reason == "jam":
             self.notifier.send(
                 title="Filament Monitor",
@@ -581,12 +582,6 @@ class FilamentMonitor:
                 message="📭 Filament runout detected — print paused",
                 priority=1,
             )
-        # notification (best effort)
-        if hasattr(self, '_notifier'):
-            if reason == 'jam':
-                self._notifier.send('Filament Monitor','Filament jam detected - print paused (M600)',1)
-            elif reason == 'runout':
-                self._notifier.send('Filament Monitor','Filament runout detected - print paused',1)
 
     def _maybe_jam(self):
         """Evaluate jam condition based on pulse timing and thresholds.
