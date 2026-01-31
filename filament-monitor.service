@@ -20,9 +20,6 @@ Restart=on-failure
 RestartSec=2
 
 Environment=PYTHONUNBUFFERED=1
-Environment=FILMON_NOTIFY=1
-Environment=PUSHOVER_TOKEN=your_app_token_here
-Environment=PUSHOVER_USER=your_user_key_here
 
 [Install]
 WantedBy=multi-user.target

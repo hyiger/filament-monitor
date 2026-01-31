@@ -42,3 +42,56 @@ The project is organized as a small package with a thin CLI entrypoint:
 - **filmon.doctor** – `run_doctor` diagnostics and interactive checks
 
 This structure improves testability and keeps hardware, protocol, and state logic cleanly separated.
+
+## Notifications (optional)
+
+Filament Monitor can send push notifications when a filament jam or runout
+is detected. Notifications are delivered using the **Pushover** service,
+which supports iOS, Android, and Apple Watch.
+
+Notifications are disabled by default and must be explicitly enabled.
+
+### Requirements
+
+- A Pushover account: https://pushover.net
+- An application token and user key
+
+### Enable notifications
+
+Set the following environment variables for the filament-monitor service:
+
+- `FILMON_NOTIFY=1`
+- `PUSHOVER_TOKEN=<your application token>`
+- `PUSHOVER_USER=<your user key>`
+
+The recommended way to configure these is via a systemd override:
+
+```
+sudo systemctl edit filament-monitor
+```
+
+Add:
+
+```
+[Service]
+Environment=FILMON_NOTIFY=1
+Environment=PUSHOVER_TOKEN=your_app_token_here
+Environment=PUSHOVER_USER=your_user_key_here
+```
+
+Then restart the service:
+
+```
+sudo systemctl daemon-reload
+sudo systemctl restart filament-monitor
+```
+
+### Test notifications
+
+You can test notifications without inducing a jam or runout using:
+
+```
+./filmonctl.py test-notify
+```
+
+This sends a one-time test notification using the configured credentials.
