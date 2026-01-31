@@ -540,7 +540,7 @@ class FilamentMonitor:
         # notifier lazy init
         if not hasattr(self, '_notifier'):
             import os
-            self._notifier = Notifier(
+            # REMOVED _notifier = Notifier(
                 enabled=os.getenv('FILMON_NOTIFY','0')=='1',
                 pushover_token=os.getenv('PUSHOVER_TOKEN'),
                 pushover_user=os.getenv('PUSHOVER_USER'),
