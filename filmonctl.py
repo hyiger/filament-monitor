@@ -50,12 +50,41 @@ def _send(sock_path: str, cmd: str) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Control filament-monitor via its local UNIX socket")
-    ap.add_argument("command", choices=["status", "rearm", "reset", "enable", "arm", "unarm", "disable"],
+    ap.add_argument("command", choices=["status", "rearm", "reset", "enable", "arm", "unarm", "disable", "test-notify"],
                     help="Command to send to the daemon")
     ap.add_argument("--socket", default=os.environ.get("FILMON_SOCKET", DEFAULT_SOCK),
                     help=f"Control socket path (default: {DEFAULT_SOCK})")
     ap.add_argument("--json", action="store_true", help="Print raw JSON response")
     args = ap.parse_args()
+
+    
+    if args.command == "test-notify":
+        import os, urllib.request, urllib.parse
+        token = os.getenv("PUSHOVER_TOKEN")
+        user = os.getenv("PUSHOVER_USER")
+        if not token or not user:
+            print("error: PUSHOVER_TOKEN and PUSHOVER_USER must be set", file=sys.stderr)
+            return 2
+        data = urllib.parse.urlencode({
+            "token": token,
+            "user": user,
+            "title": "Filament Monitor",
+            "message": "Test notification from filmonctl",
+        }).encode()
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    "https://api.pushover.net/1/messages.json",
+                    data=data,
+                    method="POST",
+                ),
+                timeout=5,
+            )
+            print("ok")
+            return 0
+        except Exception as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
 
     resp = _send(args.socket, args.command)
     if args.json:

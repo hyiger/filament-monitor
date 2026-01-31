@@ -17,6 +17,7 @@ from .serialio import SerialThread
 from .state import MonitorState
 from .util import now_s
 from .constants import CONTROL_ENABLE, CONTROL_DISABLE, CONTROL_RESET, CONTROL_ARM, CONTROL_UNARM, VERSION
+from .notify import Notifier
 import os
 
 class FilamentMonitor:
@@ -161,6 +162,14 @@ class FilamentMonitor:
         self._control_thread = None
         self._control_stop_evt = threading.Event()
         self._control_sock_path: Optional[str] = None
+
+        # Optional push notifications (Pushover). Off by default.
+        notify_enabled = os.getenv("FILMON_NOTIFY", "0") == "1"
+        self.notifier = Notifier(
+            enabled=notify_enabled,
+            pushover_token=os.getenv("PUSHOVER_TOKEN"),
+            pushover_user=os.getenv("PUSHOVER_USER"),
+        )
 
 
     def _on_rearm_button_press(self):
@@ -528,6 +537,14 @@ class FilamentMonitor:
         self.logger.emit("gcode_sent", gcode=gcode)
 
     def _trigger_pause(self, reason):
+        # notifier lazy init
+        if not hasattr(self, '_notifier'):
+            import os
+            self._notifier = Notifier(
+                enabled=os.getenv('FILMON_NOTIFY','0')=='1',
+                pushover_token=os.getenv('PUSHOVER_TOKEN'),
+                pushover_user=os.getenv('PUSHOVER_USER'),
+            )
         """Latch and send the pause command due to a detected fault.
 
         Args:
@@ -550,6 +567,26 @@ class FilamentMonitor:
         # Ensure the planner is drained before pausing.
         self._send_gcode("M400")
         self._send_gcode(self.pause_gcode)
+
+        # Notify (best-effort).
+        if reason == "jam":
+            self.notifier.send(
+                title="Filament Monitor",
+                message="🚨 Filament jam detected — print paused (M600)",
+                priority=1,
+            )
+        elif reason == "runout":
+            self.notifier.send(
+                title="Filament Monitor",
+                message="📭 Filament runout detected — print paused",
+                priority=1,
+            )
+        # notification (best effort)
+        if hasattr(self, '_notifier'):
+            if reason == 'jam':
+                self._notifier.send('Filament Monitor','Filament jam detected - print paused (M600)',1)
+            elif reason == 'runout':
+                self._notifier.send('Filament Monitor','Filament runout detected - print paused',1)
 
     def _maybe_jam(self):
         """Evaluate jam condition based on pulse timing and thresholds.
