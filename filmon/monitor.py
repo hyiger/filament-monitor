@@ -542,6 +542,9 @@ class FilamentMonitor:
         Args:
             reason: Short string describing the fault (e.g. 'jam', 'runout').
         """
+        # Idempotency: if already latched, do nothing (prevents duplicate pause/notify).
+        if self.state.latched:
+            return
         self.state.latched = True
         self.state.pause_sent_ts = time.time()
         self.state.last_trigger = reason
