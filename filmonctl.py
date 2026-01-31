@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Local control client for filament-monitor.
+"""
+Local control client for filament-monitor.
 
 The monitor holds the printer serial port, so external consoles cannot safely
 share the device. filmonctl talks to the monitor over a local UNIX socket.
 
 Commands:
-  status | rearm | reset | enable | arm | unarm | disable
+  status | rearm | reset | enable | arm | unarm | disable | test-notify
 
 Socket path:
-  - default: /run/filmon.sock
+  - default: /run/filmon/filmon.sock
   - override: --socket PATH or FILMON_SOCKET env var
 """
 
@@ -19,6 +20,8 @@ import json
 import os
 import socket
 import sys
+import urllib.request
+import urllib.parse
 
 DEFAULT_SOCK = "/run/filmon/filmon.sock"
 
@@ -49,28 +52,54 @@ def _send(sock_path: str, cmd: str) -> dict:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Control filament-monitor via its local UNIX socket")
-    ap.add_argument("command", choices=["status", "rearm", "reset", "enable", "arm", "unarm", "disable", "test-notify"],
-                    help="Command to send to the daemon")
-    ap.add_argument("--socket", default=os.environ.get("FILMON_SOCKET", DEFAULT_SOCK),
-                    help=f"Control socket path (default: {DEFAULT_SOCK})")
+    ap = argparse.ArgumentParser(
+        description="Control filament-monitor via its local UNIX socket"
+    )
+    ap.add_argument(
+        "command",
+        choices=[
+            "status",
+            "rearm",
+            "reset",
+            "enable",
+            "arm",
+            "unarm",
+            "disable",
+            "test-notify",
+        ],
+        help="Command to send to the daemon",
+    )
+    ap.add_argument(
+        "--socket",
+        default=os.environ.get("FILMON_SOCKET", DEFAULT_SOCK),
+        help=f"Control socket path (default: {DEFAULT_SOCK})",
+    )
     ap.add_argument("--json", action="store_true", help="Print raw JSON response")
     args = ap.parse_args()
 
-    
+    # ------------------------------------------------------------
+    # test-notify: local Pushover test (no daemon involvement)
+    # ------------------------------------------------------------
     if args.command == "test-notify":
-        import os, urllib.request, urllib.parse
         token = os.getenv("PUSHOVER_TOKEN")
         user = os.getenv("PUSHOVER_USER")
+
         if not token or not user:
-            print("error: PUSHOVER_TOKEN and PUSHOVER_USER must be set", file=sys.stderr)
+            print(
+                "error: PUSHOVER_TOKEN and PUSHOVER_USER must be set",
+                file=sys.stderr,
+            )
             return 2
-        data = urllib.parse.urlencode({
-            "token": token,
-            "user": user,
-            "title": "Filament Monitor",
-            "message": "Test notification from filmonctl",
-        }).encode()
+
+        data = urllib.parse.urlencode(
+            {
+                "token": token,
+                "user": user,
+                "title": "Filament Monitor",
+                "message": "Test notification from filmonctl",
+            }
+        ).encode()
+
         try:
             urllib.request.urlopen(
                 urllib.request.Request(
@@ -86,19 +115,30 @@ def main() -> int:
             print(f"error: {e}", file=sys.stderr)
             return 2
 
+    # ------------------------------------------------------------
+    # All other commands go to the daemon
+    # ------------------------------------------------------------
     resp = _send(args.socket, args.command)
+
     if args.json:
         print(json.dumps(resp, indent=2, sort_keys=True))
     else:
         if resp.get("ok"):
-            if args.command in ("status",):
+            if args.command == "status":
                 state = resp.get("state", {})
                 ver = resp.get("version", "")
-                print(f"ok  version={ver} enabled={state.get('enabled')} armed={state.get('armed')} latched={state.get('latched')} pulses_reset={state.get('motion_pulses_since_reset')}")
+                print(
+                    f"ok  "
+                    f"version={ver} "
+                    f"enabled={state.get('enabled')} "
+                    f"armed={state.get('armed')} "
+                    f"latched={state.get('latched')} "
+                    f"pulses_reset={state.get('motion_pulses_since_reset')}"
+                )
             else:
                 print("ok")
         else:
-            print(f"error: {resp.get('error','unknown error')}", file=sys.stderr)
+            print(f"error: {resp.get('error', 'unknown error')}", file=sys.stderr)
             raw = resp.get("raw")
             if raw:
                 print(raw, file=sys.stderr)
