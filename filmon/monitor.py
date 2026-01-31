@@ -9,6 +9,8 @@ import math
 import time
 from typing import Optional
 
+
+from dataclasses import asdict
 from .gpio import DigitalInputDevice
 from .logging import JsonLogger
 from .serialio import SerialThread
