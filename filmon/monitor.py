@@ -537,19 +537,14 @@ class FilamentMonitor:
         self.logger.emit("gcode_sent", gcode=gcode)
 
     def _trigger_pause(self, reason):
-        # notifier lazy init
-        if not hasattr(self, '_notifier'):
-            import os
-            self._notifier = Notifier(
-                enabled=os.getenv('FILMON_NOTIFY','0')=='1',
-                pushover_token=os.getenv('PUSHOVER_TOKEN'),
-                pushover_user=os.getenv('PUSHOVER_USER'),
-            )
         """Latch and send the pause command due to a detected fault.
 
         Args:
             reason: Short string describing the fault (e.g. 'jam', 'runout').
         """
+        # Idempotency: if already latched, do nothing (prevents duplicate pause/notify).
+        if self.state.latched:
+            return
         self.state.latched = True
         self.state.pause_sent_ts = time.time()
         self.state.last_trigger = reason
