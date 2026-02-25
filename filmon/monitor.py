@@ -593,7 +593,7 @@ class FilamentMonitor:
         if (self.arm_grace_pulses > 0 or self.arm_grace_s > 0.0) and self.state.arm_ts:
             pulses_ok = self.state.motion_pulses_since_arm >= self.arm_grace_pulses if self.arm_grace_pulses > 0 else True
             time_ok = (now - self.state.arm_ts) >= self.arm_grace_s if self.arm_grace_s > 0.0 else True
-            if not (pulses_ok and time_ok):
+            if not (pulses_ok or time_ok):
                 return
 
         timeout_s = self._effective_jam_timeout_s(now)

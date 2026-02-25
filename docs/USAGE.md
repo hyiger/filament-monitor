@@ -271,9 +271,9 @@ The monitor will include `pps_ema` and `jam_timeout_effective_s` in the heartbea
 ### Post-(re)arm grace period (config-only)
 
 To prevent an immediate false jam right after `filmon:arm` or a rearm action, you can configure a grace gate.
-Jam latching is suppressed until both conditions are met:
+Jam latching is suppressed until either condition is met:
 
-- at least `arm_grace_pulses` pulses have been observed since (re)arm, **and**
+- at least `arm_grace_pulses` pulses have been observed since (re)arm, **or**
 - at least `arm_grace_s` seconds have elapsed since (re)arm
 
 Example:
