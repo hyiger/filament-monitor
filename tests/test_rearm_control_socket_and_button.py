@@ -1,5 +1,6 @@
 import json
 import socket
+import tempfile
 import time
 import pytest
 
@@ -78,7 +79,7 @@ def _send_cmd(sock_path: str, cmd: str) -> dict:
     return json.loads(line) if line else {}
 
 
-def test_control_socket_rearm_clears_latch_and_arms(monkeypatch, tmp_path):
+def test_control_socket_rearm_clears_latch_and_arms(monkeypatch):
     m, mon, logger = _make_monitor(monkeypatch)
 
     # Put monitor into a "latched" state to simulate a jam pause.
@@ -87,15 +88,18 @@ def test_control_socket_rearm_clears_latch_and_arms(monkeypatch, tmp_path):
     mon.state.motion_pulses_since_reset = 123
     mon.state.motion_pulses_since_arm = 45
 
-    sock_path = tmp_path / "filmon.sock"
-    mon.start_control_socket(str(sock_path))
+    # Use /tmp directly to avoid macOS's 104-byte AF_UNIX path length limit.
+    tmpdir = tempfile.mkdtemp(dir="/tmp")
+    sock_path = tmpdir + "/filmon.sock"
+    mon.start_control_socket(sock_path)
 
     # Wait briefly for server thread to bind.
+    import os
     deadline = time.time() + 2.0
-    while time.time() < deadline and not sock_path.exists():
+    while time.time() < deadline and not os.path.exists(sock_path):
         time.sleep(0.01)
 
-    resp = _send_cmd(str(sock_path), "rearm")
+    resp = _send_cmd(sock_path, "rearm")
     assert resp.get("ok") is True
 
     assert mon.state.latched is False
