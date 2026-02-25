@@ -12,7 +12,7 @@ class JsonLogger:
         """Create a JSON logger.
 
         Args:
-            stream: A file-like object (defaults to stdout) used for event output.
+            enable_json: When True, emit one-line JSON; otherwise emit a human-readable text line.
         """
         self.enable_json = enable_json
 

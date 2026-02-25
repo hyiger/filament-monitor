@@ -200,7 +200,6 @@ def run_self_test(args):
     motion = DigitalInputDevice(args.motion_gpio, pull_up=True)
     pulse_count = 0
 
-    """Increment the local pulse counter for this diagnostic test."""
     def on_pulse():
         """Increment a local pulse counter for this diagnostic test."""
         nonlocal pulse_count

@@ -19,8 +19,9 @@ class SerialThread(threading.Thread):
 
         Args:
             ser: An open pyserial Serial instance.
-            on_line: Callback invoked with each decoded line (str).
-            logger: JsonLogger for emitting serial-related events (optional).
+            out_q: Queue that decoded lines are put into.
+            stop_evt: Threading event; the thread exits when this is set.
+            logger: JsonLogger for emitting serial-related events.
         """
         super().__init__(daemon=True)
         self.ser = ser
