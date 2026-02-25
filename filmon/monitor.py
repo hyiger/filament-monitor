@@ -110,7 +110,6 @@ class FilamentMonitor:
         self.runout = None
         self.runout_active_high = runout_active_high
         self.runout_debounce_s = runout_debounce_s
-        self.jam_timeout_adaptive = jam_timeout_adaptive
         self.state.jam_timeout_adaptive = jam_timeout_adaptive
         self._last_runout_edge = 0.0
 
