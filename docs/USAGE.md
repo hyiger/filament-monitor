@@ -144,24 +144,25 @@ The filament monitor operates as a small, explicit state machine. Understanding 
 stateDiagram-v2
   [*] --> DISABLED: startup
 
-  DISABLED --> ENABLED_UNARMED: filmon enable
-  ENABLED_UNARMED --> DISABLED: filmon disable
-  ENABLED_ARMED --> DISABLED: filmon disable
-  LATCHED --> DISABLED: filmon disable
+  DISABLED --> ENABLED: filmon:enable
+  DISABLED --> ARMED: filmon:arm
+  ENABLED --> DISABLED: filmon:disable
+  ARMED --> DISABLED: filmon:disable
 
-  ENABLED_UNARMED --> ENABLED_ARMED: filmon arm
+  ENABLED --> ARMED: filmon:arm
+  ARMED --> ENABLED: filmon:unarm
 
-  ENABLED_ARMED --> LATCHED: jam timeout
-  ENABLED_ARMED --> LATCHED: runout asserted
+  ARMED --> LATCHED: jam timeout
+  ARMED --> LATCHED: runout asserted
 
-  LATCHED --> DISABLED: filmon reset
-  LATCHED --> ENABLED_ARMED: rearm (button long-press / control-socket)
+  LATCHED --> DISABLED: filmon:reset
+  LATCHED --> ARMED: rearm (button long-press / control-socket)
 ```
 
 **Notes (matches the implementation):**
 - **`filmon:reset` returns to `DISABLED`** (clears latch/counters and disables monitoring).
-- **`rearm` clears the latch and returns to `ENABLED_ARMED`** (enabled + armed). This can be triggered via the control socket, and (if configured) a **long press** on the rearm button.
-- While **`LATCHED`**, additional jam/runout detections are ignored until you `reset` or `rearm`.
+- **`rearm` clears the latch and returns to `ARMED`**. This can be triggered via the control socket, and (if configured) a **long press** on the rearm button.
+- While **`LATCHED`**, the only valid transitions are `reset` (→ DISABLED) and `rearm` (→ ARMED). All other markers, including `filmon:disable`, are ignored until the latch is cleared.
 
 ### Control inputs (markers, socket, button)
 
@@ -192,9 +193,9 @@ flowchart TD
 
 **State legend**
 - **DISABLED** — monitoring is off; motion and runout checks are ignored.
-- **ENABLED_UNARMED** — enabled but unarmed; safe during travel, heatup, and ultra-low-flow segments.
-- **ENABLED_ARMED** — enabled and armed; jam/runout conditions can trigger a pause.
-- **LATCHED** — a pause has been triggered; no further actions occur until reset.
+- **ENABLED** — enabled but unarmed; safe during travel, heatup, and ultra-low-flow segments.
+- **ARMED** — enabled and armed; jam/runout conditions can trigger a pause.
+- **LATCHED** — overlay on ARMED: a pause has been triggered; no further actions occur until `reset` or `rearm`.
 
 Control marker mapping:
 - *filmon enable* → `filmon:enable`

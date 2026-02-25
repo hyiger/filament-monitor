@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
+
+
+class MonitorMode(str, Enum):
+    DISABLED = "disabled"
+    ENABLED  = "enabled"
+    ARMED    = "armed"
+
 
 @dataclass
 
@@ -9,10 +17,20 @@ class MonitorState:
     """Holds mutable runtime state for the monitor.
 
     This is the shared state updated by GPIO callbacks, the serial reader, and the
-    main monitoring loop. It includes arming/enabled/latch flags and timing/pulse
-    counters used for jam and runout decisions."""
-    enabled: bool = False
-    armed: bool = False
+    main monitoring loop. It includes a mode flag, a latch flag, and timing/pulse
+    counters used for jam and runout decisions.
+
+    mode transitions:
+        DISABLED → ENABLED  (filmon:enable)
+        DISABLED → ARMED    (filmon:arm)
+        ENABLED  → ARMED    (filmon:arm)
+        ENABLED  → DISABLED (filmon:disable / filmon:reset)
+        ARMED    → ENABLED  (filmon:unarm)
+        ARMED    → DISABLED (filmon:disable / filmon:reset)
+        any      → DISABLED (filmon:reset also clears latch)
+    latched=True is an overlay on ARMED: jam/runout fired, waiting for operator reset/rearm.
+    """
+    mode: MonitorMode = MonitorMode.DISABLED
     latched: bool = False
     pause_sent_ts: float = 0.0
     last_trigger: str = ""
@@ -29,5 +47,3 @@ class MonitorState:
     serial_connected: bool = False
     serial_port: str = ""
     baud: int = 0
-
-

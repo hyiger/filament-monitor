@@ -1,8 +1,9 @@
 
 import time
+from filmon.state import MonitorMode
 
 
-def _mk_monitor(enabled=True, armed=True, latched=False):
+def _mk_monitor(armed=True, latched=False):
     from filmon.monitor import FilamentMonitor
     from filmon.state import MonitorState
 
@@ -28,7 +29,7 @@ def _mk_monitor(enabled=True, armed=True, latched=False):
     m._send_gcode = lambda g: None
     m._pps = lambda now: 0.0
 
-    st = MonitorState(enabled=enabled, armed=armed, latched=latched)
+    st = MonitorState(mode=MonitorMode.ARMED if armed else MonitorMode.DISABLED, latched=latched)
     st.last_pulse_ts = time.time()
     st.motion_pulses_since_reset = 0
     st.motion_pulses_since_arm = 0
@@ -38,7 +39,7 @@ def _mk_monitor(enabled=True, armed=True, latched=False):
 
 
 def test_single_notification_on_jam_then_no_duplicate_when_latched():
-    m = _mk_monitor(enabled=True, armed=True, latched=False)
+    m = _mk_monitor(armed=True, latched=False)
 
     m._trigger_pause(reason="jam")
     assert len(m.notifier.calls) == 1
@@ -50,6 +51,6 @@ def test_single_notification_on_jam_then_no_duplicate_when_latched():
 
 
 def test_no_notify_when_already_latched():
-    m = _mk_monitor(enabled=True, armed=True, latched=True)
+    m = _mk_monitor(armed=True, latched=True)
     m._trigger_pause(reason="jam")
     assert m.notifier.calls == []

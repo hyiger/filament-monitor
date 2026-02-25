@@ -16,7 +16,7 @@ When a jam or runout is detected:
 1. A single pause command (default: `M600`) is issued
 2. The monitor enters a **latched** state
 3. No additional pause commands are sent
-4. Jam detection remains disabled until `filmon:reset`
+4. Jam/runout detection is suppressed until the latch is cleared via `filmon:reset` or `rearm`
 
 This latch is explicitly tested to prevent repeated pause commands
 (“jam storms”) during recovery or user intervention.

@@ -4,6 +4,7 @@ import time
 import pytest
 
 from builtins import DummyGPIO
+from filmon.state import MonitorMode
 
 
 class CapturingLogger:
@@ -81,8 +82,7 @@ def test_control_socket_rearm_clears_latch_and_arms(monkeypatch, tmp_path):
     m, mon, logger = _make_monitor(monkeypatch)
 
     # Put monitor into a "latched" state to simulate a jam pause.
-    mon.state.enabled = True
-    mon.state.armed = True
+    mon.state.mode = MonitorMode.ARMED
     mon.state.latched = True
     mon.state.motion_pulses_since_reset = 123
     mon.state.motion_pulses_since_arm = 45
@@ -99,8 +99,7 @@ def test_control_socket_rearm_clears_latch_and_arms(monkeypatch, tmp_path):
     assert resp.get("ok") is True
 
     assert mon.state.latched is False
-    assert mon.state.enabled is True
-    assert mon.state.armed is True
+    assert mon.state.mode == MonitorMode.ARMED
     assert mon.state.motion_pulses_since_reset == 0
     assert mon.state.motion_pulses_since_arm == 0
 
@@ -150,8 +149,7 @@ def test_rearm_button_short_press_triggers_reset(monkeypatch):
     monkeypatch.setattr(m.monitor, "now_s", lambda: tnow["t"], raising=True)
 
     # Start from a latched + enabled/armed state
-    mon.state.enabled = True
-    mon.state.armed = True
+    mon.state.mode = MonitorMode.ARMED
     mon.state.latched = True
     mon.state.motion_pulses_since_reset = 10
     mon.state.motion_pulses_since_arm = 5
@@ -161,9 +159,8 @@ def test_rearm_button_short_press_triggers_reset(monkeypatch):
     tnow["t"] += 0.4
     mon._on_rearm_button_release()
 
-    # Reset semantics: disabled + disarmed + unlatched, counters cleared
-    assert mon.state.enabled is False
-    assert mon.state.armed is False
+    # Reset semantics: disabled + unlatched, counters cleared
+    assert mon.state.mode == MonitorMode.DISABLED
     assert mon.state.latched is False
     assert mon.state.motion_pulses_since_reset == 0
     assert mon.state.motion_pulses_since_arm == 0
@@ -179,8 +176,7 @@ def test_rearm_button_long_press_triggers_rearm(monkeypatch):
     monkeypatch.setattr(m.monitor, "now_s", lambda: tnow["t"], raising=True)
 
     # Start latched
-    mon.state.enabled = True
-    mon.state.armed = True
+    mon.state.mode = MonitorMode.ARMED
     mon.state.latched = True
     mon.state.motion_pulses_since_reset = 10
     mon.state.motion_pulses_since_arm = 5
@@ -190,8 +186,7 @@ def test_rearm_button_long_press_triggers_rearm(monkeypatch):
     mon._on_rearm_button_release()
 
     assert mon.state.latched is False
-    assert mon.state.enabled is True
-    assert mon.state.armed is True
+    assert mon.state.mode == MonitorMode.ARMED
     assert mon.state.motion_pulses_since_reset == 0
     assert mon.state.motion_pulses_since_arm == 0
 

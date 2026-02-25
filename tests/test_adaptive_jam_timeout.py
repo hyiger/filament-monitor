@@ -29,8 +29,6 @@ def _make_monitor(adaptive: bool):
         jam_timeout_ema_halflife_s=3.0,
         gpio_factory=DummyGPIO,
     )
-    mon.enabled = True
-    mon.armed = True
     return mon
 
 

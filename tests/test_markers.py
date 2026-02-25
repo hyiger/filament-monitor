@@ -1,6 +1,7 @@
 def test_control_markers_enable_arm_unarm_disable_reset():
     m = load_module()
     from builtins import DummyGPIO
+    from filmon.state import MonitorMode
 
     class CapturingLogger(m.JsonLogger):
         def __init__(self):
@@ -26,27 +27,22 @@ def test_control_markers_enable_arm_unarm_disable_reset():
     )
 
     mon._handle_control_marker("M118 A1 filmon:enable")
-    assert mon.state.enabled is True
-    assert mon.state.armed is False
+    assert mon.state.mode == MonitorMode.ENABLED
     assert logger.events[-1][0] == "enabled"
 
     mon._handle_control_marker("M118 A1 filmon:arm")
-    assert mon.state.enabled is True
-    assert mon.state.armed is True
+    assert mon.state.mode == MonitorMode.ARMED
     assert logger.events[-1][0] == "armed"
 
     mon._handle_control_marker("M118 A1 filmon:unarm")
-    assert mon.state.enabled is True
-    assert mon.state.armed is False
+    assert mon.state.mode == MonitorMode.ENABLED
     assert logger.events[-1][0] == "unarmed"
 
     mon._handle_control_marker("M118 A1 filmon:disable")
-    assert mon.state.enabled is False
-    assert mon.state.armed is False
+    assert mon.state.mode == MonitorMode.DISABLED
     assert logger.events[-1][0] == "disabled"
 
     mon._handle_control_marker("M118 A1 filmon:reset")
-    assert mon.state.enabled is False
+    assert mon.state.mode == MonitorMode.DISABLED
     assert mon.state.latched is False
-    assert mon.state.armed is False
     assert logger.events[-1][0] == "reset"
