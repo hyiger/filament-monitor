@@ -3,7 +3,6 @@
 [Back to README](../README.md)
 
 ### Related documentation
-- [Usage](USAGE.md)
 - [Marlin / G-code Integration](INTEGRATION.md)
 - [Deployment & Architecture](DEPLOYMENT.md)
 
@@ -59,8 +58,7 @@ Control markers (sent via `M118 A1`):
  - `filmon:unarm`
 
 ## Quick start
-```
-bash
+```bash
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
@@ -106,16 +104,14 @@ For an overview of the monitor’s internal states and why layer-change gating w
 ### Start G-code
 Add these lines in Start G-code (before printing begins):
 
-```
-gcode
+```gcode
 M118 A1 filmon:reset
 M118 A1 filmon:enable
 ```
 
 Recommended (defensive): add a disable near the top of Start G-code (helps if the monitor survives between prints):
 
-```
-gcode
+```gcode
 M118 A1 filmon:disable
 ```
 
@@ -123,8 +119,7 @@ M118 A1 filmon:disable
 
 Arm exactly once at the start of **layer 2** (PrusaSlicer `layer_num` is zero-based: 0=layer 1, 1=layer 2):
 
-```
-gcode
+```gcode
 ;BEFORE_LAYER_CHANGE
 {if layer_num==1}M118 A1 filmon:arm{endif}
 ```
@@ -136,15 +131,11 @@ Optional: if you have known ultra-low-flow features where pulses may be very spa
 ### End G-code
 Disable monitoring early in End G-code:
 
-```
-gcode
+```gcode
 M118 A1 filmon:disable
 ```
 
 ## How it works
-
-### State model
-The filament monitor operates as a small, explicit state machine. Understanding these states makes it easier to reason about false positives, layer-change behavior, and recovery after a pause.
 
 ### State model
 The filament monitor operates as a small, explicit state machine. Understanding these states makes it easier to reason about false positives, layer-change behavior, and recovery after a pause.
@@ -280,9 +271,9 @@ The monitor will include `pps_ema` and `jam_timeout_effective_s` in the heartbea
 ### Post-(re)arm grace period (config-only)
 
 To prevent an immediate false jam right after `filmon:arm` or a rearm action, you can configure a grace gate.
-Jam latching is suppressed until either condition is met:
+Jam latching is suppressed until both conditions are met:
 
-- at least `arm_grace_pulses` pulses have been observed since (re)arm, **or**
+- at least `arm_grace_pulses` pulses have been observed since (re)arm, **and**
 - at least `arm_grace_s` seconds have elapsed since (re)arm
 
 Example:
@@ -312,16 +303,14 @@ All installation and configuration instructions are maintained in this README.
 
 
 ### 1) OS packages
-```
-bash
+```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip python3-gpiozero
 ```
 
 ### 2) Python dependencies
 From the project directory:
-```
-bash
+```bash
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
@@ -387,16 +376,6 @@ rearm_button_active_high = false
 - `true`: active-high
 
 If omitted, the monitor assumes an active-low button.
-
-Configuration:
-```
-toml
-[gpio]
-rearm_button_gpio = 25
-rearm_button_active_high = false
-rearm_button_debounce
-rearm_button_long_press = 0.25
-```
 
 
 ### run_doctor

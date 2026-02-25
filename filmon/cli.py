@@ -124,8 +124,9 @@ def main():
         pulse_window_s=args.pulse_window,
         stall_thresholds_s=args.stall_thresholds,
         rearm_button_gpio=args.rearm_button_gpio,
-        rearm_button_active_high=False,
+        rearm_button_active_high=getattr(args, "rearm_button_active_high", False),
         rearm_button_debounce_s=args.rearm_button_debounce,
+        rearm_button_long_press_s=getattr(args, "rearm_button_long_press", 1.5),
     )
 
     if not args.no_banner:
