@@ -144,18 +144,18 @@ The filament monitor operates as a small, explicit state machine. Understanding 
 stateDiagram-v2
   [*] --> DISABLED: startup
 
-  DISABLED --> ENABLED: filmon:enable
-  DISABLED --> ARMED: filmon:arm
-  ENABLED --> DISABLED: filmon:disable
-  ARMED --> DISABLED: filmon:disable
+  DISABLED --> ENABLED: filmon enable
+  DISABLED --> ARMED: filmon arm
+  ENABLED --> DISABLED: filmon disable
+  ARMED --> DISABLED: filmon disable
 
-  ENABLED --> ARMED: filmon:arm
-  ARMED --> ENABLED: filmon:unarm
+  ENABLED --> ARMED: filmon arm
+  ARMED --> ENABLED: filmon unarm
 
   ARMED --> LATCHED: jam timeout
   ARMED --> LATCHED: runout asserted
 
-  LATCHED --> DISABLED: filmon:reset
+  LATCHED --> DISABLED: filmon reset
   LATCHED --> ARMED: rearm (button long-press / control-socket)
 ```
 
@@ -199,6 +199,8 @@ flowchart TD
 
 Control marker mapping:
 - *filmon enable* → `filmon:enable`
+- *filmon arm* → `filmon:arm`
+- *filmon unarm* → `filmon:unarm`
 - *filmon disable* → `filmon:disable`
 - *filmon reset* → `filmon:reset`
 
