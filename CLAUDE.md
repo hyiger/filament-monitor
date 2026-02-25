@@ -12,7 +12,7 @@ filmonctl.py          # Local control client (connects to daemon via UNIX socket
 filmon/
   cli.py              # Argument parsing and startup
   monitor.py          # FilamentMonitor — core state machine and detection logic
-  state.py            # MonitorState dataclass
+  state.py            # MonitorMode enum + MonitorState dataclass
   doctor.py           # config_defaults_from(), build_arg_parser(), run_doctor(), run_self_test()
   serialio.py         # SerialThread — background serial reader
   gpio.py             # DigitalInputDevice wrapper (gpiozero / LGPIOFactory)
@@ -105,16 +105,18 @@ Serial writes are protected by `_ser_lock`. Everything else communicates through
 
 ### State machine
 
-Four logical states governed by three `MonitorState` booleans (`enabled`, `armed`, `latched`):
+Three modes in `MonitorMode(str, Enum)` plus a `latched` overlay:
 
 ```
-DISABLED → (filmon:enable) → ENABLED_UNARMED → (filmon:arm) → ENABLED_ARMED
-ENABLED_ARMED → (jam / runout) → LATCHED
+DISABLED → (filmon:enable) → ENABLED → (filmon:arm) → ARMED
+ARMED → (jam / runout) → ARMED + latched=True   # LATCHED
 LATCHED → (filmon:reset) → DISABLED
-LATCHED → (rearm button long-press / socket rearm) → ENABLED_ARMED
-any → (filmon:disable) → DISABLED
+LATCHED → (rearm button long-press / socket rearm) → ARMED
+any → (filmon:disable) → DISABLED  (no-op while latched; only reset/rearm exit latch)
 filmon:reset always wins regardless of current state
 ```
+
+`MonitorMode` values: `"disabled"` / `"enabled"` / `"armed"` — members are plain strings so `dataclasses.asdict()` + `json.dumps` serialize them without a custom encoder.
 
 ### Control markers
 
@@ -131,7 +133,7 @@ Parsed from the printer serial stream (`M118 A1 filmon:<verb>`), case-insensitiv
 ### Jam detection
 
 1. Main loop calls `_maybe_jam()` every cycle.
-2. Skipped unless `enabled`, `armed`, and not `latched`.
+2. Skipped unless `mode == MonitorMode.ARMED` and not `latched`.
 3. **Grace gate** (optional): suppresses jam latching until *either* `arm_grace_pulses` pulses *or* `arm_grace_s` seconds have elapsed since arm — whichever comes first. The `or` is intentional: lack of pulses *is* the jam condition, so the time gate must be able to release independently.
 4. Effective timeout is static (`jam_timeout_s`) or adaptive (`jam_timeout_k / max(pps_ema, pps_floor)`, clamped to `[jam_timeout_min_s, jam_timeout_max_s]`).
 5. If `now - last_pulse_ts >= effective_timeout`, calls `_trigger_pause("jam")`.
@@ -221,7 +223,7 @@ CLI arguments override all TOML values. `rearm_button_active_high` has no CLI fl
 | `startup` | Daemon started |
 | `armed` / `unarmed` / `enabled` / `disabled` / `reset` | State transitions |
 | `first_pulse_after_arm` | First motion pulse after arming |
-| `hb` | Periodic heartbeat (enabled only); includes pps, pps_ema, jam_timeout_effective_s |
+| `hb` | Periodic heartbeat (enabled only); includes mode, pps, pps_ema, jam_timeout_effective_s |
 | `stall` | dt_since_pulse crosses a stall threshold while armed |
 | `pause_triggered` | Fault detected; pause G-code sent |
 | `gcode_sent` | Any G-code transmitted |
