@@ -23,9 +23,9 @@ import os
 class FilamentMonitor:
     """Filament motion/runout monitor controller.
 
-    Wires together GPIO edge callbacks, serial control markers (filmon:enable|disable|reset), and the
-    jam/runout decision logic. When a fault is detected while enabled, it sends a
-    pause command (default: M600) over serial and latches until reset."""
+    Wires together GPIO edge callbacks, serial control markers, and the
+    jam/runout decision logic. When a fault is detected while armed, it sends a
+    pause command (default: M600) over serial and latches until reset or rearm."""
     def __init__(
         self,
         state: MonitorState,
@@ -110,7 +110,6 @@ class FilamentMonitor:
         self.runout = None
         self.runout_active_high = runout_active_high
         self.runout_debounce_s = runout_debounce_s
-        # Adaptive jam timeout (optional; config-only)
         self.jam_timeout_adaptive = jam_timeout_adaptive
         self.state.jam_timeout_adaptive = jam_timeout_adaptive
         self._last_runout_edge = 0.0
@@ -210,8 +209,8 @@ class FilamentMonitor:
     def _on_motion_pulse(self):
         """GPIO callback for filament-motion pulses.
 
-        Updates pulse counters and timestamps used to determine whether filament is
-        moving when the monitor is enabled."""
+        Updates pulse counters and timestamps used by jam detection.
+        The per-arm counter and first-pulse breadcrumb are only updated while ARMED."""
         # Ignore late GPIO callbacks once shutdown begins.
         if self._stop_evt.is_set():
             return
