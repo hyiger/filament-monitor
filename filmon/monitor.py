@@ -546,10 +546,10 @@ class FilamentMonitor:
         if self.state.latched:
             return
         self.state.latched = True
-        self.state.pause_sent_ts = time.time()
-        self.state.last_trigger = reason
-        self.state.last_trigger_ts = time.time()
         now = now_s()
+        self.state.pause_sent_ts = now
+        self.state.last_trigger = reason
+        self.state.last_trigger_ts = now
         dt = (now - self.state.last_pulse_ts) if self.state.last_pulse_ts else None
         self.logger.emit(
             "pause_triggered",
@@ -563,7 +563,6 @@ class FilamentMonitor:
         self._send_gcode("M400")
         self._send_gcode(self.pause_gcode)
 
-        # Notify (best-effort).
         # Notify (best-effort).
         if reason == "jam":
             self.notifier.send(
