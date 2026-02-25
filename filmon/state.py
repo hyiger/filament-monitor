@@ -10,7 +10,6 @@ class MonitorMode(str, Enum):
     Members are plain strings (str + Enum) so dataclasses.asdict() and
     json.dumps() serialize them without a custom encoder.
     """
-    
     DISABLED = "disabled"  # monitoring off; motion/runout checks ignored
     ENABLED  = "enabled"   # monitoring on but unarmed; safe during travel/heatup
     ARMED    = "armed"     # armed; jam/runout conditions can trigger a pause
