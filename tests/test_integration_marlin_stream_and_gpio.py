@@ -6,6 +6,7 @@ from typing import List
 import pytest
 
 from builtins import DummyGPIO
+from filmon.state import MonitorMode
 
 
 class FakeSerial:
@@ -153,8 +154,7 @@ def test_marlin_like_serial_stream_gpio_activity_rearm_then_runout(monkeypatch):
     ]:
         mon._handle_control_marker(line)
 
-    assert mon.state.enabled is True
-    assert mon.state.armed is True
+    assert mon.state.mode == MonitorMode.ARMED
     assert mon.state.latched is False
 
     mm_per_pulse = 2.88
@@ -191,8 +191,7 @@ def test_marlin_like_serial_stream_gpio_activity_rearm_then_runout(monkeypatch):
     t["now"] += 0.6
     mon._on_rearm_button_release()
     assert mon.state.latched is False
-    assert mon.state.enabled is True
-    assert mon.state.armed is True
+    assert mon.state.mode == MonitorMode.ARMED
 
     # more activity
     for _ in range(8):

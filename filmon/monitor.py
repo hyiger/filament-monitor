@@ -14,7 +14,7 @@ from dataclasses import asdict
 from .gpio import DigitalInputDevice
 from .logging import JsonLogger
 from .serialio import SerialThread
-from .state import MonitorState
+from .state import MonitorState, MonitorMode
 from .util import now_s
 from .constants import CONTROL_ENABLE, CONTROL_DISABLE, CONTROL_RESET, CONTROL_ARM, CONTROL_UNARM, VERSION
 from .notify import Notifier
@@ -225,7 +225,7 @@ class FilamentMonitor:
         self.state.motion_pulses_since_reset += 1
 
         # Per-arm pulse counter + first-pulse breadcrumb
-        if self.state.armed:
+        if self.state.mode == MonitorMode.ARMED:
             if self.state.motion_pulses_since_arm == 0 and self.state.arm_ts:
                 self.logger.emit("first_pulse_after_arm", dt=round(ts - self.state.arm_ts, 3))
             self.state.motion_pulses_since_arm += 1
@@ -302,12 +302,11 @@ class FilamentMonitor:
         now = now_s()
 
         # Heartbeat snapshot (enabled only, to avoid noise when fully off)
-        if self._breadcrumb_interval_s > 0 and self.state.enabled and now >= self._next_hb_ts:
+        if self._breadcrumb_interval_s > 0 and self.state.mode != MonitorMode.DISABLED and now >= self._next_hb_ts:
             dt = now - self.state.last_pulse_ts if self.state.last_pulse_ts else None
             self.logger.emit(
                 "hb",
-                enabled=int(self.state.enabled),
-                armed=int(self.state.armed),
+                mode=self.state.mode,
                 latched=int(self.state.latched),
                 runout=int(self.state.runout_asserted),
                 dt_since_pulse=(round(dt, 3) if dt is not None else None),
@@ -320,7 +319,7 @@ class FilamentMonitor:
             self._next_hb_ts = now + self._breadcrumb_interval_s
 
         # Stall breadcrumbs: only while detection is active
-        if not (self.state.enabled and self.state.armed) or self.state.latched:
+        if self.state.mode != MonitorMode.ARMED or self.state.latched:
             return
 
         if not self._stall_thresholds_s:
@@ -352,9 +351,9 @@ class FilamentMonitor:
             return
         # Always track the debounced runout state, but only log/act once armed.
         self.state.runout_asserted = True
-        if self.state.armed:
+        if self.state.mode == MonitorMode.ARMED:
             self.logger.emit("runout_asserted")
-            if self.state.enabled and not self.state.latched:
+            if not self.state.latched:
                 self._trigger_pause("runout")
 
     def _on_runout_cleared(self):
@@ -363,7 +362,7 @@ class FilamentMonitor:
             return
         # Always track the debounced runout state, but only log once armed.
         self.state.runout_asserted = False
-        if self.state.armed:
+        if self.state.mode == MonitorMode.ARMED:
             self.logger.emit("runout_cleared")
 
     def attach_serial(self, ser):
@@ -523,8 +522,7 @@ class FilamentMonitor:
         self.state.last_pulse_ts = now
         self._reset_pulse_tracking()
         self._stall_next_idx = 0
-        self.state.enabled = True
-        self.state.armed = True
+        self.state.mode = MonitorMode.ARMED
         self.logger.emit("rearmed")
 
     def _send_gcode(self, gcode):
@@ -584,7 +582,7 @@ class FilamentMonitor:
 
         The jam timeout may be adaptive (pps-based) when enabled. Additionally, an optional post-(re)arm grace
         period can be configured to reduce false positives during sparse extrusion (e.g., tiny endgame layers)."""
-        if not self.state.enabled or self.state.latched or not self.state.armed:
+        if self.state.mode != MonitorMode.ARMED or self.state.latched:
             return
 
         now = now_s()
@@ -616,8 +614,7 @@ class FilamentMonitor:
 
         # NOTE: reset always wins.
         if CONTROL_RESET in low:
-            self.state.enabled = False
-            self.state.armed = False
+            self.state.mode = MonitorMode.DISABLED
             self.state.latched = False
             self.state.runout_asserted = False
             self.state.motion_pulses_since_reset = 0
@@ -628,32 +625,25 @@ class FilamentMonitor:
             self.logger.emit("reset")
             return
 
-        # Ignore state transitions while latched except disable/reset.
+        # Ignore state transitions while latched except reset (handled above).
         if self.state.latched:
-            if CONTROL_DISABLE in low:
-                self.state.enabled = False
-                self.state.armed = False
-                self.logger.emit("disabled")
             return
 
         if CONTROL_DISABLE in low:
-            self.state.enabled = False
-            self.state.armed = False
+            self.state.mode = MonitorMode.DISABLED
             self.logger.emit("disabled")
             return
 
         if CONTROL_UNARM in low:
             # Idempotent: unarming should not reset counters.
-            self.state.enabled = True
-            self.state.armed = False
+            self.state.mode = MonitorMode.ENABLED
             self._stall_next_idx = 0
             self.logger.emit("unarmed")
             return
 
         if CONTROL_ARM in low:
-            # Arm implies enabled. Start timeout reference at arm time to avoid an immediate jam.
-            self.state.enabled = True
-            self.state.armed = True
+            # Start timeout reference at arm time to avoid an immediate jam.
+            self.state.mode = MonitorMode.ARMED
             self.state.motion_pulses_since_arm = 0
             self.state.arm_ts = now_s()
             self.state.last_pulse_ts = self.state.arm_ts
@@ -663,11 +653,10 @@ class FilamentMonitor:
 
         if CONTROL_ENABLE in low:
             # Enable only; never arms automatically. Idempotent and does not reset counters.
-            if self.state.enabled and not self.state.armed:
+            if self.state.mode == MonitorMode.ENABLED:
                 self.logger.emit("enabled")
                 return
-            self.state.enabled = True
-            self.state.armed = False
+            self.state.mode = MonitorMode.ENABLED
             self.state.last_pulse_ts = now_s()
             self._stall_next_idx = 0
             self.logger.emit("enabled")

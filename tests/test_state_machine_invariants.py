@@ -1,6 +1,7 @@
 import pytest
 
 from builtins import DummyGPIO
+from filmon.state import MonitorMode
 
 
 class CapturingLogger:
@@ -52,8 +53,7 @@ def test_enable_without_arm_never_jams(monkeypatch):
     monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
 
     mon._handle_control_marker("M118 A1 filmon:enable")
-    assert mon.state.enabled is True
-    assert mon.state.armed is False
+    assert mon.state.mode == MonitorMode.ENABLED
 
     # Advance beyond timeout; because we're unarmed, jam must not trigger.
     t["now"] += 5.0
@@ -69,8 +69,7 @@ def test_arm_enables_jam_detection_and_latches(monkeypatch):
 
     mon._handle_control_marker("M118 A1 filmon:enable")
     mon._handle_control_marker("M118 A1 filmon:arm")
-    assert mon.state.enabled is True
-    assert mon.state.armed is True
+    assert mon.state.mode == MonitorMode.ARMED
 
     # No pulses arrive; advance beyond timeout → jam triggers once and latches.
     t["now"] += 2.0
@@ -98,8 +97,7 @@ def test_latch_blocks_retrigger_until_reset(monkeypatch):
     # Reset clears latch and disables. Re-arm allows a second trigger.
     mon._handle_control_marker("filmon:reset")
     assert mon.state.latched is False
-    assert mon.state.enabled is False
-    assert mon.state.armed is False
+    assert mon.state.mode == MonitorMode.DISABLED
 
     mon._handle_control_marker("filmon:arm")
     t["now"] += 2.0
@@ -114,7 +112,7 @@ def test_runout_requires_arm(monkeypatch):
     monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
 
     mon._handle_control_marker("filmon:enable")
-    assert mon.state.armed is False
+    assert mon.state.mode == MonitorMode.ENABLED
 
     # Runout asserted while unarmed: should not pause.
     mon._on_runout_asserted()
@@ -154,7 +152,7 @@ def test_post_arm_grace_gate_blocks_false_jam(monkeypatch):
     monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
 
     mon._handle_control_marker("filmon:arm")
-    assert mon.state.armed is True
+    assert mon.state.mode == MonitorMode.ARMED
 
     # Advance beyond the base timeout, but still within grace window and with 0 pulses since arm.
     t["now"] += 2.0

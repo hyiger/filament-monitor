@@ -13,7 +13,7 @@ import time
 
 from filmon.cli import build_arg_parser, main
 from filmon import monitor as monitor
-from filmon.state import MonitorState
+from filmon.state import MonitorState, MonitorMode
 from filmon.monitor import FilamentMonitor
 from filmon.logging import JsonLogger
 from filmon.constants import CONTROL_RESET
@@ -26,6 +26,7 @@ __all__ = [
     "main",
     "monitor",
     "MonitorState",
+    "MonitorMode",
     "FilamentMonitor",
     "JsonLogger",
     "CONTROL_RESET",
