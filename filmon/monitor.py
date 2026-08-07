@@ -318,8 +318,14 @@ class FilamentMonitor:
         self._pps_ema_last_ts = now
 
         hl = float(self.jam_timeout_ema_halflife_s)
-        if hl <= 0.0 or dt <= 0.0:
+        if hl <= 0.0:
+            # Halflife disabled: EMA tracks the instantaneous pps.
             self._pps_ema = pps_now
+            return self._pps_ema
+        if dt <= 0.0:
+            # No time elapsed since the last update (e.g. two calls in the same
+            # loop cycle): leave the smoothed EMA unchanged rather than snapping
+            # it to the instantaneous pps.
             return self._pps_ema
 
         tau = hl / math.log(2.0)
@@ -327,18 +333,24 @@ class FilamentMonitor:
         self._pps_ema = (1.0 - alpha) * self._pps_ema + alpha * pps_now
         return self._pps_ema
 
-    def _effective_jam_timeout_s(self, now: float) -> float:
-        """Return the effective jam timeout (seconds), possibly adaptive."""
+    def _effective_jam_timeout_from(self, ema: float) -> float:
+        """Return the effective jam timeout (seconds) for a given pps EMA value."""
         if not self.jam_timeout_adaptive:
             return float(self.jam_timeout_s)
 
-        pps_ema = self._update_pps_ema(now)
-        denom = max(float(self.jam_timeout_pps_floor), float(pps_ema))
+        denom = max(float(self.jam_timeout_pps_floor), float(ema))
         if denom <= 0.0:
             return float(self.jam_timeout_max_s)
 
         t = float(self.jam_timeout_k) / denom
         return max(float(self.jam_timeout_min_s), min(float(self.jam_timeout_max_s), t))
+
+    def _effective_jam_timeout_s(self, now: float) -> float:
+        """Return the effective jam timeout (seconds), possibly adaptive."""
+        if not self.jam_timeout_adaptive:
+            return float(self.jam_timeout_s)
+
+        return self._effective_jam_timeout_from(self._update_pps_ema(now))
 
     def _reset_pulse_tracking(self):
         """Reset pulse-rate tracking and stall breadcrumb state."""
@@ -358,6 +370,9 @@ class FilamentMonitor:
         # Heartbeat snapshot (enabled only, to avoid noise when fully off)
         if self._breadcrumb_interval_s > 0 and self.state.mode != MonitorMode.DISABLED and now >= self._next_hb_ts:
             dt = now - self.state.last_pulse_ts if self.state.last_pulse_ts else None
+            # Single EMA update per heartbeat: the effective timeout is derived
+            # from the same value that is logged.
+            ema = self._update_pps_ema(now)
             self.logger.emit(
                 "hb",
                 mode=self.state.mode,
@@ -365,8 +380,8 @@ class FilamentMonitor:
                 runout=int(self.state.runout_asserted),
                 dt_since_pulse=(round(dt, 3) if dt is not None else None),
                 pps=round(self._pps(now), 3),
-                pps_ema=round(self._update_pps_ema(now), 3),
-                jam_timeout_effective_s=round(self._effective_jam_timeout_s(now), 3),
+                pps_ema=round(ema, 3),
+                jam_timeout_effective_s=round(self._effective_jam_timeout_from(ema), 3),
                 pulses_reset=self.state.motion_pulses_since_reset,
                 pulses_arm=self.state.motion_pulses_since_arm,
             )
@@ -781,15 +796,23 @@ class FilamentMonitor:
                 return
 
             now = now_s()
+            timeout_s = self._effective_jam_timeout_s(now)
 
             # Optional post-(re)arm grace gate: do not allow jam latch until the grace criteria are met.
             if (self.arm_grace_pulses > 0 or self.arm_grace_s > 0.0) and self.state.arm_ts:
-                pulses_ok = self.state.motion_pulses_since_arm >= self.arm_grace_pulses if self.arm_grace_pulses > 0 else True
-                time_ok = (now - self.state.arm_ts) >= self.arm_grace_s if self.arm_grace_s > 0.0 else True
+                elapsed = now - self.state.arm_ts
+                # Unset criteria are unsatisfiable; the gate releases on whichever
+                # configured criterion is met first.
+                pulses_ok = self.arm_grace_pulses > 0 and self.state.motion_pulses_since_arm >= self.arm_grace_pulses
+                time_ok = self.arm_grace_s > 0.0 and elapsed >= self.arm_grace_s
+                # Pulses-only config: lack of pulses *is* the jam condition, so the
+                # gate must still release on time — after the effective timeout —
+                # or it would suppress detection indefinitely.
+                if self.arm_grace_pulses > 0 and self.arm_grace_s <= 0.0:
+                    time_ok = elapsed >= timeout_s
                 if not (pulses_ok or time_ok):
                     return
 
-            timeout_s = self._effective_jam_timeout_s(now)
             if now - self.state.last_pulse_ts >= timeout_s:
                 self._trigger_pause("jam")
 
@@ -859,6 +882,11 @@ class FilamentMonitor:
 
             if CONTROL_ENABLE in low:
                 # Enable only; never arms automatically. Idempotent and does not reset counters.
+                if self.state.mode == MonitorMode.ARMED:
+                    # Guard: a stray enable (e.g. in a per-layer macro) must not
+                    # demote ARMED -> ENABLED and silently turn detection off.
+                    self.logger.emit("enabled", ignored="already_armed")
+                    return
                 if self.state.mode == MonitorMode.ENABLED:
                     self.logger.emit("enabled")
                     return
