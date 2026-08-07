@@ -473,3 +473,51 @@ def test_reconcile_waits_for_quiet_after_rejected_edge(monkeypatch):
     t["now"] += 0.05
     mon._reconcile_runout()
     assert mon.state.runout_asserted is False
+
+
+def test_release_bounce_does_not_reset(monkeypatch):
+    """A contact-bounce release milliseconds after an accepted press must not
+    be classified as a short press (= reset, silently disabling monitoring);
+    the real release later still measures from the original press (Codex
+    review on #37)."""
+    m, mon, logger = _make_monitor(
+        monkeypatch, rearm_button_gpio=25, rearm_button_active_high=False
+    )
+    t = {"now": 900.0}
+    monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
+
+    # Latch a jam so a long press has something to rearm.
+    mon._handle_control_marker("filmon:arm")
+    t["now"] += 10.0
+    mon._maybe_jam()
+    assert mon.state.latched is True
+
+    press = _button_level(False, pressed=True)
+    release = _button_level(False, pressed=False)
+
+    # Press, bounce-release 5 ms later, bounce-press, then hold to a real
+    # long-press release.
+    mon.rearm_button.set_level(press)
+    t["now"] += 0.005
+    mon.rearm_button.set_level(release)   # bounce: must be ignored
+    assert mon.state.mode == m.MonitorMode.ARMED
+    assert mon.state.latched is True      # NOT reset/disabled
+    t["now"] += 0.005
+    mon.rearm_button.set_level(press)     # bounce press: rejected by debounce
+    t["now"] += 2.0
+    mon.rearm_button.set_level(release)   # real release: 2.01 s from original press
+
+    assert mon.state.latched is False
+    assert mon.state.mode == m.MonitorMode.ARMED
+    assert "rearmed" in _events(logger)
+    assert "reset" not in _events(logger)
+
+
+def test_trigger_pause_refuses_when_not_armed(monkeypatch):
+    """_trigger_pause must not fire for a monitor that is no longer ARMED —
+    closes the reconcile-vs-reset race at this layer (Codex review on #37)."""
+    m, mon, logger = _make_monitor(monkeypatch, runout_gpio=27)
+    mon._handle_control_marker("filmon:reset")
+    mon._trigger_pause("runout")
+    assert mon.state.latched is False
+    assert mon._ser.writes == []

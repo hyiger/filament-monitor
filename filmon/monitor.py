@@ -20,6 +20,12 @@ from .constants import CONTROL_ENABLE, CONTROL_DISABLE, CONTROL_RESET, CONTROL_A
 from .notify import Notifier
 import os
 
+# Maximum duration treated as release contact bounce. Deliberately much
+# shorter than the press-edge debounce default (0.25 s): mechanical bounce is
+# single-digit milliseconds, while a real human tap is ~0.1 s and must still
+# register as a short press.
+REARM_RELEASE_BOUNCE_S = 0.05
+
 class FilamentMonitor:
     """Filament motion/runout monitor controller.
 
@@ -194,6 +200,13 @@ class FilamentMonitor:
             return
         now = now_s()
         dur = now - self._rearm_press_start_ts
+        # Contact bounce right after the press shows up as an ultra-short
+        # release. Ignore it and keep the press timestamp: the bounce press
+        # that follows is rejected by the press-edge debounce, so the real
+        # release still measures from the original press. The threshold is
+        # capped well below the press debounce so quick taps still register.
+        if dur < min(self.rearm_button_debounce_s, REARM_RELEASE_BOUNCE_S):
+            return
         self._rearm_press_start_ts = None
 
         if dur >= self.rearm_button_long_press_s:
@@ -591,6 +604,12 @@ class FilamentMonitor:
         """
         # Idempotency: if already latched, do nothing (prevents duplicate pause/notify).
         if self.state.latched:
+            return
+        # A pause only ever makes sense while ARMED. Every caller checks this,
+        # but a concurrent reset/disable from the socket or button thread can
+        # land between that check and here — refuse rather than pause a
+        # monitor the operator just disabled.
+        if self.state.mode != MonitorMode.ARMED:
             return
         self.state.latched = True
         now = now_s()
