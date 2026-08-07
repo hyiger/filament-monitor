@@ -267,3 +267,12 @@ def test_omitted_debounce_stays_none_while_runout_disabled(tmp_path):
     assert args.runout_debounce is None
     from filmon.doctor import apply_runout_guardrails
     assert "--runout-debounce" not in apply_runout_guardrails(args)
+
+
+def test_nonpositive_stall_thresholds_rejected(tmp_path):
+    """A threshold <= 0 is satisfied instantly after every pulse and floods
+    the log with false stall events (Codex round-4 review)."""
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text('[logging]\nstall_thresholds = "0,3"\n')
+    with pytest.raises(SystemExit, match="> 0"):
+        parse_config(["--config", str(cfg)])

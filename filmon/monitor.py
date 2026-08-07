@@ -146,6 +146,10 @@ class FilamentMonitor:
         # Reconciliation keys its quiet-period check on this: a rejected final
         # edge milliseconds ago must not count as a settled input.
         self._last_runout_edge_seen = 0.0
+        # Two-phase reconciliation candidate: (level, first_seen_ts) — a level
+        # that disagrees with tracked state must hold across two passes a full
+        # debounce window apart before reconciliation acts (see _reconcile_runout).
+        self._reconcile_candidate = None
 
         if runout_gpio is not None:
             # Let gpiozero normalize polarity: with pull_up=not active_high,
@@ -408,15 +412,21 @@ class FilamentMonitor:
             self._stall_next_idx += 1
 
     def _debounced(self) -> bool:
-        """Return True if the runout input change passes debounce filtering."""
-        ts = now_s()
-        # Record every observed edge (even rejected ones) so _reconcile_runout
-        # never treats a still-chattering input as settled.
-        self._last_runout_edge_seen = ts
-        if ts - self._last_runout_edge < self.runout_debounce_s:
-            return False
-        self._last_runout_edge = ts
-        return True
+        """Return True if the runout input change passes debounce filtering.
+
+        Runs under _state_lock: _reconcile_runout holds that lock across its
+        quiet-period check, level sample, and decision, so stamping the
+        observed-edge timestamp under the same lock means an edge can never
+        slip in between those steps unnoticed."""
+        with self._state_lock:
+            ts = now_s()
+            # Record every observed edge (even rejected ones) so _reconcile_runout
+            # never treats a still-chattering input as settled.
+            self._last_runout_edge_seen = ts
+            if ts - self._last_runout_edge < self.runout_debounce_s:
+                return False
+            self._last_runout_edge = ts
+            return True
 
     def _on_runout_asserted(self):
         """GPIO callback when the runout switch asserts (filament not present)."""
@@ -474,16 +484,30 @@ class FilamentMonitor:
         is_active = getattr(self.runout, "is_active", None)
         if is_active is None:
             return
-        now = now_s()
-        if self.runout_debounce_s and (now - self._last_runout_edge_seen) < self.runout_debounce_s:
-            return
-        # Sample and decide under the state lock: an edge callback or an
-        # operator reset must not interleave between the level read and the
-        # state update/pause.
+        # Check quiet period, sample, and decide under the state lock. The
+        # edge callbacks stamp _last_runout_edge_seen under this same lock
+        # (see _debounced) — but a physical pin flip milliseconds before the
+        # sample cannot have stamped yet (its callback is parked on this very
+        # lock), so a single sample of a divergent level is not trusted:
+        # two-phase confirmation requires the level to hold across two passes
+        # a full debounce window apart before acting.
         with self._state_lock:
+            now = now_s()
+            if self.runout_debounce_s and (now - self._last_runout_edge_seen) < self.runout_debounce_s:
+                self._reconcile_candidate = None
+                return
             level = bool(self.runout.is_active)
             if level == self.state.runout_asserted:
+                self._reconcile_candidate = None
                 return
+            if self.runout_debounce_s:
+                cand = self._reconcile_candidate
+                if cand is None or cand[0] != level:
+                    self._reconcile_candidate = (level, now)
+                    return
+                if now - cand[1] < self.runout_debounce_s:
+                    return
+            self._reconcile_candidate = None
             self.state.runout_asserted = level
             if self.state.mode != MonitorMode.ARMED:
                 return
@@ -498,9 +522,12 @@ class FilamentMonitor:
         """Attach an already-open serial port to the monitor.
 
         Also used by the serial reader to swap in a reopened port after a
-        reconnect, so the swap takes the write lock."""
+        reconnect, so the swap takes the write lock. Attaching an open port
+        means connected: _send_gcode refuses writes while the reader has
+        flagged a disconnect."""
         with self._ser_lock:
             self._ser = ser
+            self.state.serial_connected = True
 
     def start_serial_reader(self, verbose: bool = False, port: str = "", baud: int = 0):
         """Start the background serial reader thread if a serial port is attached.
@@ -631,8 +658,10 @@ class FilamentMonitor:
                     if not chunk:
                         break
                     data += chunk
-                # Only the first line is the command; ignore any pipelined extras.
-                cmd = data.split(b"\n", 1)[0].decode("utf-8", errors="replace").strip()
+                # Only the first line is the command; ignore any pipelined
+                # extras. Normalize case here: _handle_control_command accepts
+                # mixed case, so the dispatch decision below must too.
+                cmd = data.split(b"\n", 1)[0].decode("utf-8", errors="replace").strip().lower()
                 if cmd == "test-notify":
                     # Blocks until the HTTP outcome is known (seconds). Hand
                     # the connection to a short-lived thread so reset/rearm
@@ -794,7 +823,21 @@ class FilamentMonitor:
             # case the pause-retry path exists for. The OS transmits the
             # buffered bytes asynchronously.
             with self._ser_lock:
+                # The reader clears serial_connected BEFORE taking this lock to
+                # close a dead port. A write that races in first could be
+                # buffered by the dying object and discarded on close while
+                # being reported as delivered — refuse instead; the pause
+                # retry path resends once the port is back.
+                if not self.state.serial_connected:
+                    raise OSError("serial disconnected (reconnect in progress)")
                 self._ser.write((gcode + "\n").encode())
+                # Re-check after the write: a disconnect that began mid-write
+                # means the dying object may have buffered these bytes only to
+                # discard them on close. Treat the write as failed — a
+                # possible duplicate pause after reconnect beats a silently
+                # lost one.
+                if not self.state.serial_connected:
+                    raise OSError("serial disconnected during write")
         except _SERIAL_WRITE_ERRORS as e:
             self.logger.emit("gcode_send_failed", gcode=gcode, error=str(e))
             return False

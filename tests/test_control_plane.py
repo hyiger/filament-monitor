@@ -414,3 +414,23 @@ def test_slow_test_notify_does_not_block_other_commands(monkeypatch):
     finally:
         release.set()
         mon.stop()
+
+
+def test_mixed_case_test_notify_is_threaded_and_answered(monkeypatch):
+    """TEST-NOTIFY must hit the same threaded dispatch as test-notify — the
+    case-sensitive check let mixed case run synchronously on the accept loop
+    (Codex round-4 review)."""
+    m, mon, logger = _make_monitor(monkeypatch)
+
+    class FakeNotifier:
+        enabled = True
+        def send_sync(self, title, message, priority=0):
+            return True
+    mon.notifier = FakeNotifier()
+
+    sock_path = _start_socket(mon)
+    try:
+        resp = _send_raw(sock_path, b"TEST-NOTIFY\n")
+        assert resp == {"ok": True, "enabled": True}
+    finally:
+        mon.stop()

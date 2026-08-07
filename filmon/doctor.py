@@ -462,9 +462,10 @@ def validate_args(args):
                 f"Invalid stall_thresholds {st!r}: expected comma-separated seconds, e.g. \"3,6\""
             )
         # A nan entry wedges the stall breadcrumb index (comparisons with nan
-        # never succeed), silencing all later thresholds.
-        if any(not math.isfinite(x) for x in parsed):
-            raise SystemExit(f"Invalid stall_thresholds {st!r}: entries must be finite numbers")
+        # never succeed), silencing all later thresholds; a threshold <= 0 is
+        # satisfied instantly after every pulse and floods the log.
+        if any(not math.isfinite(x) or x <= 0 for x in parsed):
+            raise SystemExit(f"Invalid stall_thresholds {st!r}: entries must be finite and > 0")
 
     return args
 
