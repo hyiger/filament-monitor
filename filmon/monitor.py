@@ -629,6 +629,15 @@ class FilamentMonitor:
                     data += chunk
                 # Only the first line is the command; ignore any pipelined extras.
                 cmd = data.split(b"\n", 1)[0].decode("utf-8", errors="replace").strip()
+                if cmd == "test-notify":
+                    # Blocks until the HTTP outcome is known (seconds). Hand
+                    # the connection to a short-lived thread so reset/rearm
+                    # clients are not starved behind a slow notification test.
+                    threading.Thread(
+                        target=self._answer_control_conn, args=(conn, cmd), daemon=True
+                    ).start()
+                    conn = None  # ownership transferred; skip the finally-close
+                    continue
                 resp = self._handle_control_command(cmd)
                 conn.sendall((json.dumps(resp, sort_keys=True) + "\n").encode("utf-8"))
             except Exception as e:
@@ -637,10 +646,11 @@ class FilamentMonitor:
                 except Exception:
                     pass
             finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
         try:
             srv.close()
@@ -655,6 +665,25 @@ class FilamentMonitor:
             self.logger.emit("control_socket_stopped", path=path, reason=stop_reason)
         except Exception:
             pass
+
+    def _answer_control_conn(self, conn, cmd: str):
+        """Handle one already-read command on its own thread and reply.
+
+        Used for commands that block (test-notify): the accept loop stays free
+        for state-changing commands while this runs."""
+        try:
+            resp = self._handle_control_command(cmd)
+            conn.sendall((json.dumps(resp, sort_keys=True) + "\n").encode("utf-8"))
+        except Exception as e:
+            try:
+                conn.sendall((json.dumps({"ok": False, "error": str(e)}) + "\n").encode("utf-8"))
+            except Exception:
+                pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _handle_control_command(self, cmd: str) -> dict:
         cmd = (cmd or "").strip().lower()

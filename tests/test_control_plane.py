@@ -372,3 +372,45 @@ def test_rearm_button_long_press_when_not_latched_logs_ignored_and_does_not_arm(
     assert fields["reason"] == "not latched"
 
     mon.stop()
+
+
+def test_slow_test_notify_does_not_block_other_commands(monkeypatch):
+    """test-notify blocks until the HTTP outcome; that must not starve
+    state-changing commands behind it on the single accept loop (Codex
+    review on #40)."""
+    import threading as _threading
+
+    m, mon, logger = _make_monitor(monkeypatch)
+
+    release = _threading.Event()
+    class SlowNotifier:
+        enabled = True
+        def send_sync(self, title, message, priority=0):
+            release.wait(10.0)  # simulates a slow Pushover round-trip
+            return True
+    mon.notifier = SlowNotifier()
+
+    sock_path = _start_socket(mon)
+    try:
+        results = {}
+        def call(cmd, key):
+            results[key] = _send_raw(sock_path, (cmd + "\n").encode())
+
+        t_notify = _threading.Thread(target=call, args=("test-notify", "notify"), daemon=True)
+        t_notify.start()
+        time.sleep(0.2)  # let the notify command occupy its handler thread
+
+        # A status command must complete while test-notify is still blocked.
+        t_status = _threading.Thread(target=call, args=("status", "status"), daemon=True)
+        t_status.start()
+        t_status.join(timeout=2.0)
+        assert not t_status.is_alive(), "status starved behind test-notify"
+        assert results["status"]["ok"] is True
+
+        release.set()
+        t_notify.join(timeout=2.0)
+        assert not t_notify.is_alive()
+        assert results["notify"]["ok"] is True
+    finally:
+        release.set()
+        mon.stop()
