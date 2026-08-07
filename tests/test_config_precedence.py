@@ -10,7 +10,7 @@ import json
 import pytest
 
 from filmon.cli import parse_config
-from filmon.doctor import resolved_config_dict
+from filmon.doctor import build_arg_parser, resolved_config_dict
 
 
 def _write_toml(tmp_path, text):
@@ -177,3 +177,54 @@ def test_print_config_includes_rearm_button_settings():
     assert gpio["rearm_button_debounce"] == 0.25
     assert gpio["rearm_button_long_press"] == 1.5
     assert gpio["rearm_button_active_high"] is False
+
+
+# ---------------- Codex review follow-ups ----------------
+
+def test_non_finite_timeouts_rejected(tmp_path):
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("[detection]\njam_timeout = nan\n")
+    with pytest.raises(SystemExit, match="finite"):
+        parse_config(["--config", str(cfg)])
+    cfg.write_text("[detection]\njam_timeout_min = inf\n")
+    with pytest.raises(SystemExit, match="finite"):
+        parse_config(["--config", str(cfg)])
+
+
+def test_fractional_integer_fields_rejected(tmp_path):
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("[gpio]\nmotion_gpio = 26.9\n")
+    with pytest.raises(SystemExit, match="integer"):
+        parse_config(["--config", str(cfg)])
+
+
+def test_string_boolean_rejected(tmp_path):
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text('[gpio]\nrunout_enabled = "false"\n')
+    with pytest.raises(SystemExit, match="true or false"):
+        parse_config(["--config", str(cfg)])
+
+
+def test_nonpositive_adaptive_bounds_rejected(tmp_path):
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("[detection]\njam_timeout_min = 0\njam_timeout_max = 0\n")
+    with pytest.raises(SystemExit, match="must be > 0"):
+        parse_config(["--config", str(cfg)])
+    cfg.write_text("[detection]\njam_timeout_k = -1\n")
+    with pytest.raises(SystemExit, match="jam_timeout_k"):
+        parse_config(["--config", str(cfg)])
+
+
+def test_no_control_socket_works_on_bare_parser():
+    # Direct build_arg_parser() consumers (re-exported for wrappers/tests) must
+    # keep the old behavior: the flag itself disables the socket.
+    ap = build_arg_parser()
+    args = ap.parse_args(["--no-control-socket"])
+    assert args.control_socket == ""
+
+
+def test_runout_active_low_overrides_toml(tmp_path):
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("[gpio]\nrunout_enabled = true\nrunout_active_high = true\n")
+    args = parse_config(["--config", str(cfg), "--runout-active-low"])
+    assert args.runout_active_high is False

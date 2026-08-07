@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import math
 import json
 import os
 import queue
@@ -343,6 +344,17 @@ _FLOAT_ARG_KEYS = (
     "breadcrumb_interval",
     "pulse_window",
 )
+# Boolean fields whose TOML values must be real booleans: a quoted
+# "false" is a non-empty (truthy) string and would silently invert intent.
+_BOOL_ARG_KEYS = (
+    "runout_enabled",
+    "runout_active_high",
+    "rearm_button_active_high",
+    "jam_timeout_adaptive",
+    "verbose",
+    "no_banner",
+    "json",
+)
 
 
 def validate_args(args):
@@ -361,9 +373,17 @@ def validate_args(args):
         if isinstance(v, bool):
             raise SystemExit(f"Invalid value for {name}: {v!r} (expected a number)")
         try:
-            v = conv(v)
+            f = float(v)
         except (TypeError, ValueError):
             raise SystemExit(f"Invalid value for {name}: {v!r} (expected a number)")
+        # nan/inf are valid TOML floats but poison every timeout comparison
+        # (elapsed >= nan is always False -> detection silently disabled).
+        if not math.isfinite(f):
+            raise SystemExit(f"Invalid value for {name}: {v!r} (must be a finite number)")
+        # Integer fields must be integral: motion_gpio = 26.9 must not become pin 26.
+        if conv is int and f != int(f):
+            raise SystemExit(f"Invalid value for {name}: {v!r} (expected an integer)")
+        v = conv(f)
         setattr(args, name, v)
         return v
 
@@ -372,8 +392,28 @@ def validate_args(args):
     for name in _FLOAT_ARG_KEYS:
         _coerce(name, float)
 
+    for name in _BOOL_ARG_KEYS:
+        v = getattr(args, name, None)
+        if v is not None and not isinstance(v, bool):
+            raise SystemExit(f"Invalid value for {name}: {v!r} (expected true or false)")
+
     if args.jam_timeout is not None and args.jam_timeout <= 0:
         raise SystemExit(f"jam_timeout must be > 0 (got {args.jam_timeout})")
+
+    # Adaptive-timeout parameters must be positive: a zero/negative clamp or
+    # coefficient makes the effective timeout <= 0, i.e. an instant false jam.
+    if args.jam_timeout_min <= 0 or args.jam_timeout_max <= 0:
+        raise SystemExit(
+            f"jam_timeout_min/jam_timeout_max must be > 0 (got {args.jam_timeout_min}/{args.jam_timeout_max})"
+        )
+    if args.jam_timeout_k <= 0:
+        raise SystemExit(f"jam_timeout_k must be > 0 (got {args.jam_timeout_k})")
+    if args.jam_timeout_pps_floor <= 0:
+        raise SystemExit(f"jam_timeout_pps_floor must be > 0 (got {args.jam_timeout_pps_floor})")
+    if args.jam_timeout_ema_halflife < 0:
+        raise SystemExit(f"jam_timeout_ema_halflife must be >= 0 (got {args.jam_timeout_ema_halflife})")
+    if getattr(args, "jam_timeout_adaptive", False) and args.pulse_window <= 0:
+        raise SystemExit("jam_timeout_adaptive requires pulse_window > 0 (pps is measured over that window)")
 
     if args.jam_timeout_min > args.jam_timeout_max:
         raise SystemExit(
@@ -442,6 +482,23 @@ def resolved_config_dict(args) -> dict:
     }
 
 
+class _NoControlSocketAction(argparse.Action):
+    """--no-control-socket: set the boolean dest AND clear control_socket.
+
+    Setting both keeps direct build_arg_parser() consumers working (the flag
+    immediately disables the socket) while the boolean dest lets parse_config()
+    re-apply the disable after the TOML merge.
+    """
+
+    def __init__(self, option_strings, dest, **kwargs):
+        kwargs.setdefault("default", False)
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, True)
+        namespace.control_socket = ""
+
+
 def build_arg_parser(defaults=None):
     """Construct the CLI argument parser for the daemon."""
     ap = argparse.ArgumentParser(epilog=USAGE_EXAMPLES, formatter_class=RawDescriptionHelpFormatter)
@@ -474,6 +531,8 @@ def build_arg_parser(defaults=None):
     ap.add_argument("--no-banner", dest="no_banner", action="store_true", help="Disable the startup banner.")
     ap.add_argument("--banner", dest="no_banner", action="store_false", help="Enable the startup banner.")
     ap.add_argument("--runout-active-high", action="store_true", help="Treat the runout signal as active-high.")
+    ap.add_argument("--runout-active-low", dest="runout_active_high", action="store_false",
+                    help="Treat the runout signal as active-low (default; overrides a config file that sets active-high).")
     ap.add_argument("--doctor", action="store_true",
                     help="Run diagnostics and exit: GPIO pulse/runout/button checks, plus an M118 serial echo check when -p/--port is given (non-fatal).")
     ap.add_argument("--self-test", action="store_true",
@@ -507,7 +566,10 @@ def build_arg_parser(defaults=None):
                             help="Path to a local UNIX control socket (e.g. /run/filmon.sock). Use to rearm without sharing the printer serial port.")
     # Distinct boolean dest so an explicit CLI disable survives the TOML merge
     # (a const="" on control_socket would be clobbered by a configured socket path).
-    sock_group.add_argument("--no-control-socket", dest="no_control_socket", action="store_true",
+    # The action also clears control_socket directly so consumers that call
+    # build_arg_parser()/parse_args() without parse_config() keep the old
+    # "flag disables the socket" behavior.
+    sock_group.add_argument("--no-control-socket", dest="no_control_socket", action=_NoControlSocketAction,
                             help="Disable the local control socket.")
     ap.add_argument("--config", help="Path to a TOML config file. CLI args override config values.")
     ap.add_argument("--print-config", action="store_true", help="Print the resolved configuration and exit.")
