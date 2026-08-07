@@ -54,3 +54,7 @@ class MonitorState:
     serial_connected: bool = False
     serial_port: str = ""
     baud: int = 0
+
+    # Mirrors the monitor's adaptive-timeout config so status snapshots
+    # (dataclasses.asdict) report whether the jam timeout is adaptive.
+    jam_timeout_adaptive: bool = False

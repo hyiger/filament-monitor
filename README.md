@@ -94,4 +94,14 @@ You can test notifications without inducing a jam or runout using:
 ./filmonctl.py test-notify
 ```
 
-This sends a one-time test notification using the configured credentials.
+This asks the running daemon to send a one-time test notification through its
+own Notifier — the daemon's environment (e.g. the systemd unit's
+`FILMON_NOTIFY`/`PUSHOVER_*` settings) is what gets exercised, so a passing
+test means a real jam/runout alert will deliver.
+
+To test Pushover credentials from the *current shell* instead (no daemon
+involved), use:
+
+```
+./filmonctl.py test-notify-local
+```

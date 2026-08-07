@@ -6,7 +6,11 @@ The monitor holds the printer serial port, so external consoles cannot safely
 share the device. filmonctl talks to the monitor over a local UNIX socket.
 
 Commands:
-  status | rearm | reset | enable | arm | unarm | disable | test-notify
+  status | rearm | reset | enable | arm | unarm | disable | test-notify | test-notify-local
+
+test-notify goes through the daemon so the daemon's own Notifier (its
+environment, its FILMON_NOTIFY gate) sends the test. test-notify-local POSTs
+directly from this client's environment and proves nothing about the daemon.
 
 Socket path:
   - default: /run/filmon/filmon.sock
@@ -28,15 +32,21 @@ DEFAULT_SOCK = "/run/filmon/filmon.sock"
 
 def _send(sock_path: str, cmd: str) -> dict:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5.0)
     try:
-        s.connect(sock_path)
-        s.sendall((cmd.strip() + "\n").encode("utf-8"))
-        data = b""
-        while b"\n" not in data and len(data) < 65536:
-            chunk = s.recv(4096)
-            if not chunk:
-                break
-            data += chunk
+        # A missing/refusing/wedged daemon should yield a clean error, not a
+        # traceback or a client hung forever in recv().
+        try:
+            s.connect(sock_path)
+            s.sendall((cmd.strip() + "\n").encode("utf-8"))
+            data = b""
+            while b"\n" not in data and len(data) < 65536:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        except (FileNotFoundError, ConnectionRefusedError, socket.timeout, OSError) as e:
+            return {"ok": False, "error": f"cannot reach daemon at {sock_path}: {e}"}
         line = data.decode("utf-8", errors="replace").strip()
         if not line:
             return {"ok": False, "error": "empty response"}
@@ -66,8 +76,9 @@ def main() -> int:
             "unarm",
             "disable",
             "test-notify",
+            "test-notify-local",
         ],
-        help="Command to send to the daemon",
+        help="Command to send to the daemon (test-notify-local POSTs from this client instead)",
     )
     ap.add_argument(
         "--socket",
@@ -78,9 +89,13 @@ def main() -> int:
     args = ap.parse_args()
 
     # ------------------------------------------------------------
-    # test-notify: local Pushover test (no daemon involvement)
+    # test-notify-local: local Pushover test (no daemon involvement)
+    #
+    # NOTE: this tests the CLIENT environment (this shell's PUSHOVER_* vars,
+    # ignoring FILMON_NOTIFY) — it proves nothing about whether the daemon's
+    # own alerts will deliver. Use plain 'test-notify' for that.
     # ------------------------------------------------------------
-    if args.command == "test-notify":
+    if args.command == "test-notify-local":
         token = os.getenv("PUSHOVER_TOKEN")
         user = os.getenv("PUSHOVER_USER")
 
@@ -127,11 +142,12 @@ def main() -> int:
             if args.command == "status":
                 state = resp.get("state", {})
                 ver = resp.get("version", "")
+                mode = state.get("mode")
                 print(
                     f"ok  "
                     f"version={ver} "
-                    f"enabled={state.get('enabled')} "
-                    f"armed={state.get('armed')} "
+                    f"mode={mode} "
+                    f"armed={mode == 'armed'} "
                     f"latched={state.get('latched')} "
                     f"pulses_reset={state.get('motion_pulses_since_reset')}"
                 )

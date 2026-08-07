@@ -207,6 +207,7 @@ class FilamentMonitor:
             enabled=notify_enabled,
             pushover_token=os.getenv("PUSHOVER_TOKEN"),
             pushover_user=os.getenv("PUSHOVER_USER"),
+            logger=self.logger,
         )
 
 
@@ -533,7 +534,7 @@ class FilamentMonitor:
         """Start a local control socket.
 
         The socket accepts single-line commands and returns a single-line JSON response.
-        Supported commands: status, rearm, reset, enable, arm, unarm, disable.
+        Supported commands: status, rearm, reset, enable, arm, unarm, disable, test-notify.
         """
         if not sock_path:
             return
@@ -576,6 +577,7 @@ class FilamentMonitor:
         except Exception as e:
             try:
                 self.logger.emit("control_socket_error", error=str(e), path=path)
+                self.logger.emit("control_socket_stopped", path=path, reason="bind_failed")
             except Exception:
                 pass
             try:
@@ -584,23 +586,49 @@ class FilamentMonitor:
                 pass
             return
 
+        # Tolerate transient accept failures (e.g. EMFILE); only give up after
+        # several in a row so a blip cannot silently remove the control plane.
+        consecutive_accept_errors = 0
+        stop_reason = "stop_requested"
         while not self._stop_evt.is_set() and not self._control_stop_evt.is_set():
             try:
                 conn, _ = srv.accept()
             except socket.timeout:
                 continue
-            except Exception:
-                break
+            except Exception as e:
+                consecutive_accept_errors += 1
+                try:
+                    self.logger.emit(
+                        "control_socket_error",
+                        error=str(e),
+                        path=path,
+                        consecutive_errors=consecutive_accept_errors,
+                    )
+                except Exception:
+                    pass
+                if consecutive_accept_errors >= 5:
+                    stop_reason = "accept_errors"
+                    break
+                continue
+            consecutive_accept_errors = 0
 
             try:
-                conn.settimeout(2.0)
+                # Total read budget for the whole connection. A per-recv timeout
+                # alone resets on every byte, letting a byte-dripping client
+                # monopolize this single-threaded handler indefinitely.
+                deadline = now_s() + 2.0
                 data = b""
                 while b"\n" not in data and len(data) < 4096:
+                    remaining_s = deadline - now_s()
+                    if remaining_s <= 0.0:
+                        break
+                    conn.settimeout(max(0.05, remaining_s))
                     chunk = conn.recv(4096)
                     if not chunk:
                         break
                     data += chunk
-                cmd = data.decode("utf-8", errors="replace").strip()
+                # Only the first line is the command; ignore any pipelined extras.
+                cmd = data.split(b"\n", 1)[0].decode("utf-8", errors="replace").strip()
                 resp = self._handle_control_command(cmd)
                 conn.sendall((json.dumps(resp, sort_keys=True) + "\n").encode("utf-8"))
             except Exception as e:
@@ -623,6 +651,10 @@ class FilamentMonitor:
                 os.remove(path)
         except Exception:
             pass
+        try:
+            self.logger.emit("control_socket_stopped", path=path, reason=stop_reason)
+        except Exception:
+            pass
 
     def _handle_control_command(self, cmd: str) -> dict:
         cmd = (cmd or "").strip().lower()
@@ -633,8 +665,25 @@ class FilamentMonitor:
             return {"ok": True, "state": asdict(self.state), "version": VERSION}
 
         if cmd == "rearm":
-            self._cmd_rearm()
-            return {"ok": True}
+            if self._cmd_rearm():
+                return {"ok": True}
+            return {"ok": False, "error": "not latched"}
+
+        if cmd == "test-notify":
+            # Send via the daemon's own Notifier (its environment, its
+            # FILMON_NOTIFY gate) so the test proves what a real alert would do.
+            if not self.notifier.enabled:
+                return {
+                    "ok": False,
+                    "enabled": False,
+                    "error": "notifier disabled: set FILMON_NOTIFY=1, PUSHOVER_TOKEN and PUSHOVER_USER in the daemon environment",
+                }
+            self.notifier.send(
+                title="Filament Monitor",
+                message="Test notification (via daemon)",
+                priority=0,
+            )
+            return {"ok": True, "enabled": True}
 
         # Map simple state transitions to the same semantics as serial markers.
         if cmd == "reset":
@@ -655,18 +704,25 @@ class FilamentMonitor:
 
         return {"ok": False, "error": f"unknown command: {cmd}"}
 
-    def _cmd_rearm(self):
+    def _cmd_rearm(self) -> bool:
         """Clear a latched pause and re-arm detection.
 
         Intended to be used after the operator clears a jam and is about to resume
         the print. This does not require a second serial connection.
+
+        Only valid while latched (LATCHED → ARMED); rearming from any other state
+        is refused so a habitual rearm cannot arm an idle printer into a
+        guaranteed jam-pause. Returns True when the rearm was applied.
         """
-        # Refresh counters and timestamps first, then flip the enabling flags
-        # last: a concurrent _maybe_jam must never observe ARMED/unlatched
-        # with stale timing (defense in depth on top of the state lock).
-        # Note: runout_asserted is intentionally preserved so a still-standing
-        # runout re-pauses below instead of being silently forgotten.
         with self._state_lock:
+            if not self.state.latched:
+                self.logger.emit("rearm_ignored", reason="not latched", mode=self.state.mode)
+                return False
+            # Refresh counters and timestamps first, then flip the enabling flags
+            # last: a concurrent _maybe_jam must never observe ARMED/unlatched
+            # with stale timing (defense in depth on top of the state lock).
+            # Note: runout_asserted is intentionally preserved so a still-standing
+            # runout re-pauses below instead of being silently forgotten.
             self.state.motion_pulses_since_reset = 0
             self.state.motion_pulses_since_arm = 0
             now = now_s()
@@ -682,6 +738,7 @@ class FilamentMonitor:
                 self.state.runout_asserted = True
                 self.logger.emit("runout_asserted")
                 self._trigger_pause("runout")
+            return True
 
     def _send_gcode(self, gcode) -> bool:
         """Send a single G-code line over serial (adds newline and flushes).

@@ -207,10 +207,11 @@ CLI arguments override all TOML values. `rearm_button_active_high` has no CLI fl
 
 ```bash
 ./filmonctl.py status           # JSON state snapshot
-./filmonctl.py rearm            # Clear latch and re-arm
+./filmonctl.py rearm            # Clear latch and re-arm (refused unless latched)
 ./filmonctl.py reset            # Clear latch and disable
 ./filmonctl.py arm / unarm / enable / disable
-./filmonctl.py test-notify      # Send test Pushover notification
+./filmonctl.py test-notify      # Daemon sends a test Pushover notification (its env/gate)
+./filmonctl.py test-notify-local  # Direct POST from this client's environment
 ./filmonctl.py --socket /path/to/sock status   # Custom socket path
 ```
 
@@ -229,6 +230,9 @@ CLI arguments override all TOML values. `rearm_button_active_high` has no CLI fl
 | `gcode_sent` | Any G-code transmitted |
 | `runout_asserted` / `runout_cleared` | Runout edge while armed |
 | `rearmed` | Latch cleared and detection re-armed |
+| `rearm_ignored` | Rearm requested (socket/button) while not latched; refused |
+| `notify_sent` / `notify_failed` | Pushover delivery outcome (per attempt) |
+| `control_socket_error` / `control_socket_stopped` | Control socket fault / terminal exit |
 
 JSON output (`--json`): one line per event, `{"ts": <epoch>, "ts_iso": "...", "event": "...", ...}`.
 
