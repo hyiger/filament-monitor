@@ -384,3 +384,39 @@ def test_send_gcode_refuses_while_disconnected(monkeypatch):
     mon._maybe_pause_retry()
     assert mon.state.pause_delivered is True
     assert any("M600" in w for w in mon._ser.writes)
+
+
+def test_send_gcode_fails_when_disconnect_begins_mid_write(monkeypatch):
+    """A disconnect flagged while the write is in flight means the dying port
+    may buffer-and-discard the bytes: the post-write recheck must report
+    failure so the retry path resends after reconnect (Codex review on #42)."""
+    m, mon, logger, notifier = _make_monitor(monkeypatch, jam_timeout_s=1.0)
+    t = {"now": 9000.0}
+    monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
+
+    class MidWriteDisconnectSerial:
+        def __init__(self, mon):
+            self.mon = mon
+            self.writes = []
+        def write(self, data: bytes):
+            self.writes.append(data.decode(errors="replace"))
+            # Reader flags the disconnect while this write is in flight.
+            self.mon.state.serial_connected = False
+        def flush(self):
+            pass
+
+    mon.attach_serial(MidWriteDisconnectSerial(mon))
+    mon._handle_control_marker("filmon:arm")
+    t["now"] += 2.0
+    mon._maybe_jam()
+
+    assert mon.state.latched is True
+    assert mon.state.pause_delivered is False  # ambiguous write not trusted
+    assert "gcode_send_failed" in logger.names()
+
+    # Reconnect restores the flag; the retry delivers for real.
+    mon.state.serial_connected = True
+    mon._ser.write = lambda data: mon._ser.writes.append(data.decode(errors="replace"))
+    t["now"] += 10.0
+    mon._maybe_pause_retry()
+    assert mon.state.pause_delivered is True

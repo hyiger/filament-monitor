@@ -326,7 +326,11 @@ def test_reconcile_runout_syncs_swallowed_assert_edge_and_pauses(monkeypatch):
     assert mon.state.latched is False
     assert mon._ser.writes == []
 
-    # Quiet period elapsed: level is re-sampled, state synced, pause fired.
+    # Quiet period elapsed: first pass records the divergent level as a
+    # candidate; a second pass a full debounce window later confirms it.
+    t["now"] += 0.06
+    mon._reconcile_runout()
+    assert mon.state.latched is False  # candidate only, not yet acted
     t["now"] += 0.06
     mon._reconcile_runout()
     assert mon.state.runout_asserted is True
@@ -355,7 +359,9 @@ def test_reconcile_runout_syncs_swallowed_clear_edge_without_pause(monkeypatch):
     mon._last_runout_edge_seen = t["now"]
 
     t["now"] += 0.06
-    mon._reconcile_runout()
+    mon._reconcile_runout()  # candidate pass
+    t["now"] += 0.06
+    mon._reconcile_runout()  # confirmation pass
     assert mon.state.runout_asserted is False
     assert mon.state.latched is False
     assert mon._ser.writes == []
@@ -470,8 +476,11 @@ def test_reconcile_waits_for_quiet_after_rejected_edge(monkeypatch):
     mon._reconcile_runout()
     assert mon.state.runout_asserted is True
 
-    # Quiet period elapsed since the last OBSERVED edge: now it syncs.
+    # Quiet period elapsed since the last OBSERVED edge: candidate pass,
+    # then a confirmation pass a debounce window later syncs the state.
     t["now"] += 0.05
+    mon._reconcile_runout()
+    t["now"] += 0.06
     mon._reconcile_runout()
     assert mon.state.runout_asserted is False
 
@@ -553,3 +562,30 @@ def test_edge_callbacks_serialize_with_state_lock(monkeypatch):
     done.wait(1.0)
     assert done.is_set()
     assert mon.state.runout_asserted is True
+
+
+def test_reconcile_rejects_transient_level(monkeypatch):
+    """A level that reverts between reconcile passes must never pause: the
+    two-phase confirmation exists exactly for a pin flip whose edge callback
+    could not stamp yet (Codex review on #42)."""
+    m, mon, logger = _make_monitor(
+        monkeypatch, runout_gpio=27, runout_active_high=False, runout_debounce_s=0.05
+    )
+    t = {"now": 600.0}
+    monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
+    mon._handle_control_marker("filmon:arm")
+
+    # Transient: pin flips asserted without a stamped edge (callback parked),
+    # reconcile samples it once...
+    mon.runout.force_level(_runout_level(False, asserted=True))
+    t["now"] += 1.0
+    mon._reconcile_runout()
+    assert mon.state.latched is False  # candidate only
+
+    # ...and the pin reverts before the confirmation pass: no pause, candidate dropped.
+    mon.runout.force_level(_runout_level(False, asserted=False))
+    t["now"] += 0.06
+    mon._reconcile_runout()
+    assert mon.state.latched is False
+    assert mon.state.runout_asserted is False
+    assert mon._ser.writes == []

@@ -146,6 +146,10 @@ class FilamentMonitor:
         # Reconciliation keys its quiet-period check on this: a rejected final
         # edge milliseconds ago must not count as a settled input.
         self._last_runout_edge_seen = 0.0
+        # Two-phase reconciliation candidate: (level, first_seen_ts) — a level
+        # that disagrees with tracked state must hold across two passes a full
+        # debounce window apart before reconciliation acts (see _reconcile_runout).
+        self._reconcile_candidate = None
 
         if runout_gpio is not None:
             # Let gpiozero normalize polarity: with pull_up=not active_high,
@@ -482,15 +486,28 @@ class FilamentMonitor:
             return
         # Check quiet period, sample, and decide under the state lock. The
         # edge callbacks stamp _last_runout_edge_seen under this same lock
-        # (see _debounced), so no edge can land between the quiet check and
-        # the sample without either bailing this pass or waiting its turn.
+        # (see _debounced) — but a physical pin flip milliseconds before the
+        # sample cannot have stamped yet (its callback is parked on this very
+        # lock), so a single sample of a divergent level is not trusted:
+        # two-phase confirmation requires the level to hold across two passes
+        # a full debounce window apart before acting.
         with self._state_lock:
             now = now_s()
             if self.runout_debounce_s and (now - self._last_runout_edge_seen) < self.runout_debounce_s:
+                self._reconcile_candidate = None
                 return
             level = bool(self.runout.is_active)
             if level == self.state.runout_asserted:
+                self._reconcile_candidate = None
                 return
+            if self.runout_debounce_s:
+                cand = self._reconcile_candidate
+                if cand is None or cand[0] != level:
+                    self._reconcile_candidate = (level, now)
+                    return
+                if now - cand[1] < self.runout_debounce_s:
+                    return
+            self._reconcile_candidate = None
             self.state.runout_asserted = level
             if self.state.mode != MonitorMode.ARMED:
                 return
@@ -814,6 +831,13 @@ class FilamentMonitor:
                 if not self.state.serial_connected:
                     raise OSError("serial disconnected (reconnect in progress)")
                 self._ser.write((gcode + "\n").encode())
+                # Re-check after the write: a disconnect that began mid-write
+                # means the dying object may have buffered these bytes only to
+                # discard them on close. Treat the write as failed — a
+                # possible duplicate pause after reconnect beats a silently
+                # lost one.
+                if not self.state.serial_connected:
+                    raise OSError("serial disconnected during write")
         except _SERIAL_WRITE_ERRORS as e:
             self.logger.emit("gcode_send_failed", gcode=gcode, error=str(e))
             return False
