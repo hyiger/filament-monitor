@@ -183,13 +183,32 @@ def test_test_notify_command_sends_via_daemon_notifier(monkeypatch):
     calls = []
     class FakeNotifier:
         enabled = True
-        def send(self, title, message, priority=0):
+        def send_sync(self, title, message, priority=0):
             calls.append((title, message, priority))
+            return True
     mon.notifier = FakeNotifier()
 
     resp = mon._handle_control_command("test-notify")
     assert resp == {"ok": True, "enabled": True}
     assert calls == [("Filament Monitor", "Test notification (via daemon)", 0)]
+
+
+def test_test_notify_command_reports_delivery_failure(monkeypatch):
+    """The reply must reflect the real HTTP outcome — a fire-and-forget send
+    would report success exactly when credentials/network are broken (Codex
+    review on #40)."""
+    m, mon, logger = _make_monitor(monkeypatch)
+
+    class FakeNotifier:
+        enabled = True
+        def send_sync(self, title, message, priority=0):
+            return False  # e.g. HTTP 400 from a rotated token
+    mon.notifier = FakeNotifier()
+
+    resp = mon._handle_control_command("test-notify")
+    assert resp["ok"] is False
+    assert resp["enabled"] is True
+    assert "failed" in resp["error"]
 
 
 # ---------------- Real AF_UNIX socket round-trips ----------------

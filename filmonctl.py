@@ -30,9 +30,9 @@ import urllib.parse
 DEFAULT_SOCK = "/run/filmon/filmon.sock"
 
 
-def _send(sock_path: str, cmd: str) -> dict:
+def _send(sock_path: str, cmd: str, timeout_s: float = 5.0) -> dict:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(5.0)
+    s.settimeout(timeout_s)
     try:
         # A missing/refusing/wedged daemon should yield a clean error, not a
         # traceback or a client hung forever in recv().
@@ -133,7 +133,10 @@ def main() -> int:
     # ------------------------------------------------------------
     # All other commands go to the daemon
     # ------------------------------------------------------------
-    resp = _send(args.socket, args.command)
+    # test-notify blocks in the daemon until the HTTP outcome is known
+    # (up to ~5 s), so give it a wider deadline than the instant commands.
+    timeout_s = 15.0 if args.command == "test-notify" else 5.0
+    resp = _send(args.socket, args.command, timeout_s=timeout_s)
 
     if args.json:
         print(json.dumps(resp, indent=2, sort_keys=True))

@@ -42,8 +42,22 @@ class Notifier:
             return
         threading.Thread(target=self._send_sync, args=(title, message, priority), daemon=True).start()
 
-    def _send_sync(self, title: str, message: str, priority: int):
+    def send_sync(self, title: str, message: str, priority: int = 0) -> bool:
+        """Blocking send that reports the actual delivery outcome.
+
+        Used by the daemon's test-notify command: a fire-and-forget send()
+        would report success before the HTTP result is known, making the test
+        pass exactly when credentials or connectivity are broken. No-op
+        (False) when disabled.
+        """
+        if not self.enabled:
+            return False
+        return self._send_sync(title, message, priority)
+
+    def _send_sync(self, title: str, message: str, priority: int) -> bool:
         """Blocking HTTP POST to Pushover. Never raises (best-effort).
+
+        Returns True when a delivery attempt succeeded.
 
         Checks the HTTP status code and Pushover's JSON 'status' field (1 on
         success, when parseable), emitting notify_sent / notify_failed. Priority
@@ -79,7 +93,7 @@ class Notifier:
                         pass
                 if ok:
                     self._emit("notify_sent", title=title, priority=priority, attempt=attempt)
-                    return
+                    return True
                 if error is None:
                     error = f"http {status_code}"
             except Exception as e:
@@ -87,3 +101,4 @@ class Notifier:
             self._emit("notify_failed", title=title, priority=priority, attempt=attempt, status=status_code, error=error)
             if attempt < attempts:
                 time.sleep(self.RETRY_BACKOFF_S)
+        return False

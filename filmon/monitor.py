@@ -678,11 +678,15 @@ class FilamentMonitor:
                     "enabled": False,
                     "error": "notifier disabled: set FILMON_NOTIFY=1, PUSHOVER_TOKEN and PUSHOVER_USER in the daemon environment",
                 }
-            self.notifier.send(
+            # Synchronous on purpose: the reply must reflect the real HTTP
+            # outcome, not merely that a background thread was started.
+            delivered = self.notifier.send_sync(
                 title="Filament Monitor",
                 message="Test notification (via daemon)",
                 priority=0,
             )
+            if not delivered:
+                return {"ok": False, "enabled": True, "error": "notification send failed (see notify_failed log)"}
             return {"ok": True, "enabled": True}
 
         # Map simple state transitions to the same semantics as serial markers.
