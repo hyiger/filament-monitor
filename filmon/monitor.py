@@ -408,15 +408,21 @@ class FilamentMonitor:
             self._stall_next_idx += 1
 
     def _debounced(self) -> bool:
-        """Return True if the runout input change passes debounce filtering."""
-        ts = now_s()
-        # Record every observed edge (even rejected ones) so _reconcile_runout
-        # never treats a still-chattering input as settled.
-        self._last_runout_edge_seen = ts
-        if ts - self._last_runout_edge < self.runout_debounce_s:
-            return False
-        self._last_runout_edge = ts
-        return True
+        """Return True if the runout input change passes debounce filtering.
+
+        Runs under _state_lock: _reconcile_runout holds that lock across its
+        quiet-period check, level sample, and decision, so stamping the
+        observed-edge timestamp under the same lock means an edge can never
+        slip in between those steps unnoticed."""
+        with self._state_lock:
+            ts = now_s()
+            # Record every observed edge (even rejected ones) so _reconcile_runout
+            # never treats a still-chattering input as settled.
+            self._last_runout_edge_seen = ts
+            if ts - self._last_runout_edge < self.runout_debounce_s:
+                return False
+            self._last_runout_edge = ts
+            return True
 
     def _on_runout_asserted(self):
         """GPIO callback when the runout switch asserts (filament not present)."""
@@ -474,9 +480,10 @@ class FilamentMonitor:
         is_active = getattr(self.runout, "is_active", None)
         if is_active is None:
             return
-        # Check quiet period, sample, and decide under the state lock: an edge
-        # arriving between an outside-the-lock quiet check and the sample
-        # would let a still-chattering pin bypass the debounce.
+        # Check quiet period, sample, and decide under the state lock. The
+        # edge callbacks stamp _last_runout_edge_seen under this same lock
+        # (see _debounced), so no edge can land between the quiet check and
+        # the sample without either bailing this pass or waiting its turn.
         with self._state_lock:
             now = now_s()
             if self.runout_debounce_s and (now - self._last_runout_edge_seen) < self.runout_debounce_s:

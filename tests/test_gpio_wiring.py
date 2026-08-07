@@ -9,6 +9,7 @@ callback *wiring* itself is under test for both polarities.
 import builtins
 import importlib
 import sys
+import time
 
 import pytest
 
@@ -521,3 +522,34 @@ def test_trigger_pause_refuses_when_not_armed(monkeypatch):
     mon._trigger_pause("runout")
     assert mon.state.latched is False
     assert mon._ser.writes == []
+
+
+def test_edge_callbacks_serialize_with_state_lock(monkeypatch):
+    """The observed-edge stamp participates in the _state_lock discipline:
+    an edge callback must block while reconciliation (or any state-lock
+    holder) is inside its critical section (Codex review on #42)."""
+    import threading as _threading
+
+    m, mon, logger = _make_monitor(
+        monkeypatch, runout_gpio=27, runout_active_high=False, runout_debounce_s=0.05
+    )
+
+    entered = _threading.Event()
+    done = _threading.Event()
+
+    def fire_edge():
+        entered.set()
+        mon.runout.set_level(_runout_level(False, asserted=True))  # asserting edge
+        done.set()
+
+    with mon._state_lock:
+        t = _threading.Thread(target=fire_edge, daemon=True)
+        t.start()
+        entered.wait(1.0)
+        time.sleep(0.15)
+        # The callback must be parked on the lock: no state change yet.
+        assert done.is_set() is False
+        assert mon.state.runout_asserted is False
+    done.wait(1.0)
+    assert done.is_set()
+    assert mon.state.runout_asserted is True
