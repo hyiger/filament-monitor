@@ -317,7 +317,7 @@ def test_reconcile_runout_syncs_swallowed_assert_edge_and_pauses(monkeypatch):
     # Simulate a chatter burst whose final (asserting) edge fell inside the
     # debounce window: the pin is asserted but the callback was discarded.
     mon.runout.force_level(_runout_level(False, asserted=True))
-    mon._last_runout_edge = t["now"]
+    mon._last_runout_edge_seen = t["now"]
 
     # Still inside the quiet period: reconciliation must not act yet.
     mon._reconcile_runout()
@@ -351,7 +351,7 @@ def test_reconcile_runout_syncs_swallowed_clear_edge_without_pause(monkeypatch):
     # The clearing edge of a reload is swallowed by debounce: state goes stale.
     t["now"] += 0.2
     mon.runout.force_level(_runout_level(False, asserted=False))
-    mon._last_runout_edge = t["now"]
+    mon._last_runout_edge_seen = t["now"]
 
     t["now"] += 0.06
     mon._reconcile_runout()
@@ -440,3 +440,36 @@ def test_cli_refuses_to_start_on_stub_backend(monkeypatch, capsys):
     assert cli.main() == 2
     assert "GPIO" in capsys.readouterr().err
     assert calls["doctor"] == 0
+
+
+def test_reconcile_waits_for_quiet_after_rejected_edge(monkeypatch):
+    """A rejected (debounced-away) edge must restart the reconciliation quiet
+    period: the input is not settled just because the last ACCEPTED edge is
+    old (Codex review on #38)."""
+    m, mon, logger = _make_monitor(
+        monkeypatch, runout_gpio=27, runout_active_high=False, runout_debounce_s=0.05
+    )
+    t = {"now": 500.0}
+    monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
+
+    # Accepted assert edge while unarmed: tracked state becomes asserted.
+    mon.runout.set_level(_runout_level(False, asserted=True))
+    assert mon.state.runout_asserted is True
+
+    # Clear edge 0.04 s later: inside the debounce window, rejected. The pin
+    # is now physically cleared but the tracked state is stale (asserted).
+    t["now"] += 0.04
+    mon.runout.set_level(_runout_level(False, asserted=False))
+    assert mon.state.runout_asserted is True
+
+    # 0.06 s after the ACCEPTED edge but only 0.02 s after the REJECTED one:
+    # the old quiet check (keyed on accepted edges) would sync here; the fixed
+    # check must still wait.
+    t["now"] += 0.02
+    mon._reconcile_runout()
+    assert mon.state.runout_asserted is True
+
+    # Quiet period elapsed since the last OBSERVED edge: now it syncs.
+    t["now"] += 0.05
+    mon._reconcile_runout()
+    assert mon.state.runout_asserted is False

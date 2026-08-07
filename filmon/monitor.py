@@ -112,6 +112,10 @@ class FilamentMonitor:
         self.runout_debounce_s = runout_debounce_s
         self.state.jam_timeout_adaptive = jam_timeout_adaptive
         self._last_runout_edge = 0.0
+        # Timestamp of the last *observed* runout edge, accepted or rejected.
+        # Reconciliation keys its quiet-period check on this: a rejected final
+        # edge milliseconds ago must not count as a settled input.
+        self._last_runout_edge_seen = 0.0
 
         if runout_gpio is not None:
             # Let gpiozero normalize polarity: with pull_up=not active_high,
@@ -332,6 +336,9 @@ class FilamentMonitor:
     def _debounced(self) -> bool:
         """Return True if the runout input change passes debounce filtering."""
         ts = now_s()
+        # Record every observed edge (even rejected ones) so _reconcile_runout
+        # never treats a still-chattering input as settled.
+        self._last_runout_edge_seen = ts
         if ts - self._last_runout_edge < self.runout_debounce_s:
             return False
         self._last_runout_edge = ts
@@ -386,7 +393,7 @@ class FilamentMonitor:
         if is_active is None:
             return
         now = now_s()
-        if self.runout_debounce_s and (now - self._last_runout_edge) < self.runout_debounce_s:
+        if self.runout_debounce_s and (now - self._last_runout_edge_seen) < self.runout_debounce_s:
             return
         level = bool(is_active)
         if level == self.state.runout_asserted:
