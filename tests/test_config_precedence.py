@@ -228,3 +228,33 @@ def test_runout_active_low_overrides_toml(tmp_path):
     cfg.write_text("[gpio]\nrunout_enabled = true\nrunout_active_high = true\n")
     args = parse_config(["--config", str(cfg), "--runout-active-low"])
     assert args.runout_active_high is False
+
+
+def test_omitted_runout_debounce_normalizes_to_zero(tmp_path):
+    """runout_enabled=true with runout_debounce omitted must not leave None
+    (monitor's debounce math would raise TypeError on every edge)."""
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("[gpio]\nrunout_enabled = true\n")
+    args = parse_config(["--config", str(cfg)])
+    assert args.runout_debounce == 0.0
+
+
+def test_nonpositive_long_press_rejected(tmp_path):
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("[gpio]\nrearm_button_long_press = -1\n")
+    with pytest.raises(SystemExit, match="rearm_button_long_press"):
+        parse_config(["--config", str(cfg)])
+
+
+def test_blank_pause_gcode_rejected(tmp_path):
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text('[detection]\npause_gcode = "  "\n')
+    with pytest.raises(SystemExit, match="pause_gcode"):
+        parse_config(["--config", str(cfg)])
+
+
+def test_non_finite_stall_thresholds_rejected(tmp_path):
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text('[logging]\nstall_thresholds = "nan,3,6"\n')
+    with pytest.raises(SystemExit, match="finite"):
+        parse_config(["--config", str(cfg)])

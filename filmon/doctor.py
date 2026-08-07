@@ -36,11 +36,13 @@ def _serial_echo_check(port, baud, timeout_s: float = 5.0) -> bool:
     Shared by --doctor (optional, non-fatal) and --self-test. Returns True when
     the echo is observed within timeout_s.
     """
-    ser = serial.Serial(port, baud, timeout=0.5)
+    # write_timeout bounds the probe write; no flush() — tcdrain has no
+    # timeout and a printer that stopped draining its CDC buffer would hang
+    # the diagnostic before the GPIO checks ever ran.
+    ser = serial.Serial(port, baud, timeout=0.5, write_timeout=2.0)
     try:
         token = f"filmon:selftest {int(time.time())}"
         ser.write(f"M118 A1 {token}\n".encode())
-        ser.flush()
         print("  Sent:", token)
         print("  Waiting for echo...")
         deadline = time.monotonic() + timeout_s
@@ -420,10 +422,24 @@ def validate_args(args):
             f"jam_timeout_min ({args.jam_timeout_min}) must be <= jam_timeout_max ({args.jam_timeout_max})"
         )
 
+    # An omitted debounce means "no debounce": normalize to 0.0 so the
+    # monitor's elapsed-time comparison never sees None.
+    if args.runout_debounce is None:
+        args.runout_debounce = 0.0
+
     for name in ("runout_debounce", "rearm_button_debounce", "arm_grace_s", "breadcrumb_interval"):
         v = getattr(args, name, None)
         if v is not None and v < 0:
             raise SystemExit(f"{name} must be >= 0 (got {v})")
+
+    # A non-positive long-press threshold would classify EVERY release as a
+    # long press, turning the documented short-press reset into a rearm.
+    if args.rearm_button_long_press is not None and args.rearm_button_long_press <= 0:
+        raise SystemExit(f"rearm_button_long_press must be > 0 (got {args.rearm_button_long_press})")
+
+    pg = getattr(args, "pause_gcode", None)
+    if pg is not None and (not isinstance(pg, str) or not pg.strip()):
+        raise SystemExit(f"pause_gcode must be a non-empty G-code string (got {pg!r})")
 
     if args.arm_grace_pulses is not None and args.arm_grace_pulses < 0:
         raise SystemExit(f"arm_grace_pulses must be >= 0 (got {args.arm_grace_pulses})")
@@ -432,11 +448,15 @@ def validate_args(args):
     st = getattr(args, "stall_thresholds", None)
     if st:
         try:
-            [float(x.strip()) for x in str(st).split(",") if x.strip()]
+            parsed = [float(x.strip()) for x in str(st).split(",") if x.strip()]
         except ValueError:
             raise SystemExit(
                 f"Invalid stall_thresholds {st!r}: expected comma-separated seconds, e.g. \"3,6\""
             )
+        # A nan entry wedges the stall breadcrumb index (comparisons with nan
+        # never succeed), silencing all later thresholds.
+        if any(not math.isfinite(x) for x in parsed):
+            raise SystemExit(f"Invalid stall_thresholds {st!r}: entries must be finite numbers")
 
     return args
 
