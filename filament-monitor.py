@@ -11,7 +11,7 @@ previous monolithic layout).
 
 import time
 
-from filmon.cli import build_arg_parser, main
+from filmon.cli import build_arg_parser, main, parse_config
 from filmon import monitor as monitor
 from filmon.state import MonitorState, MonitorMode
 from filmon.monitor import FilamentMonitor
@@ -24,6 +24,7 @@ __all__ = [
     "time",
     "build_arg_parser",
     "main",
+    "parse_config",
     "monitor",
     "MonitorState",
     "MonitorMode",
