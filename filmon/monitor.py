@@ -32,6 +32,11 @@ class FilamentMonitor:
     Wires together GPIO edge callbacks, serial control markers, and the
     jam/runout decision logic. When a fault is detected while armed, it sends a
     pause command (default: M600) over serial and latches until reset or rearm."""
+
+    # Class-level fallback so minimal instances built via __new__ in tests
+    # keep working; __init__ replaces it with a per-instance lock.
+    _state_lock = threading.RLock()
+
     def __init__(
         self,
         state: MonitorState,
@@ -156,6 +161,12 @@ class FilamentMonitor:
 
         self._ser = None
         self._ser_lock = threading.Lock()
+        # Serializes state transitions across the main loop, runout/button
+        # callbacks, and the control socket thread, so an operator reset can
+        # never race a fault check into pausing a just-disabled monitor.
+        # RLock: _maybe_jam and the arm handlers call _trigger_pause while
+        # holding it.
+        self._state_lock = threading.RLock()
         self._stop_evt = threading.Event()
         self._serial_q = queue.Queue()
         self._serial_thread = None
@@ -362,20 +373,22 @@ class FilamentMonitor:
         if not self._debounced():
             return
         # Always track the debounced runout state, but only log/act once armed.
-        self.state.runout_asserted = True
-        if self.state.mode == MonitorMode.ARMED:
-            self.logger.emit("runout_asserted")
-            if not self.state.latched:
-                self._trigger_pause("runout")
+        with self._state_lock:
+            self.state.runout_asserted = True
+            if self.state.mode == MonitorMode.ARMED:
+                self.logger.emit("runout_asserted")
+                if not self.state.latched:
+                    self._trigger_pause("runout")
 
     def _on_runout_cleared(self):
         """GPIO callback when the runout switch clears (filament present)."""
         if not self._debounced():
             return
         # Always track the debounced runout state, but only log once armed.
-        self.state.runout_asserted = False
-        if self.state.mode == MonitorMode.ARMED:
-            self.logger.emit("runout_cleared")
+        with self._state_lock:
+            self.state.runout_asserted = False
+            if self.state.mode == MonitorMode.ARMED:
+                self.logger.emit("runout_cleared")
 
     def _runout_asserted_now(self) -> bool:
         """Return True if the runout condition currently holds.
@@ -408,18 +421,22 @@ class FilamentMonitor:
         now = now_s()
         if self.runout_debounce_s and (now - self._last_runout_edge_seen) < self.runout_debounce_s:
             return
-        level = bool(is_active)
-        if level == self.state.runout_asserted:
-            return
-        self.state.runout_asserted = level
-        if self.state.mode != MonitorMode.ARMED:
-            return
-        if level:
-            self.logger.emit("runout_asserted")
-            if not self.state.latched:
-                self._trigger_pause("runout")
-        else:
-            self.logger.emit("runout_cleared")
+        # Sample and decide under the state lock: an edge callback or an
+        # operator reset must not interleave between the level read and the
+        # state update/pause.
+        with self._state_lock:
+            level = bool(self.runout.is_active)
+            if level == self.state.runout_asserted:
+                return
+            self.state.runout_asserted = level
+            if self.state.mode != MonitorMode.ARMED:
+                return
+            if level:
+                self.logger.emit("runout_asserted")
+                if not self.state.latched:
+                    self._trigger_pause("runout")
+            else:
+                self.logger.emit("runout_cleared")
 
     def attach_serial(self, ser):
         """Attach an already-open serial port to the monitor."""
@@ -568,24 +585,25 @@ class FilamentMonitor:
         Intended to be used after the operator clears a jam and is about to resume
         the print. This does not require a second serial connection.
         """
-        # Clear latch and counters, then arm with a fresh timeout reference.
-        # Note: runout_asserted is intentionally preserved so a still-standing
-        # runout re-pauses below instead of being silently forgotten.
-        self.state.latched = False
-        self.state.motion_pulses_since_reset = 0
-        self.state.motion_pulses_since_arm = 0
-        now = now_s()
-        self.state.arm_ts = now
-        self.state.last_pulse_ts = now
-        self._reset_pulse_tracking()
-        self._stall_next_idx = 0
-        self.state.mode = MonitorMode.ARMED
-        self.logger.emit("rearmed")
-        # A runout still asserted after the operator intervention must pause again.
-        if self._runout_asserted_now():
-            self.state.runout_asserted = True
-            self.logger.emit("runout_asserted")
-            self._trigger_pause("runout")
+        with self._state_lock:
+            # Clear latch and counters, then arm with a fresh timeout reference.
+            # Note: runout_asserted is intentionally preserved so a still-standing
+            # runout re-pauses below instead of being silently forgotten.
+            self.state.latched = False
+            self.state.motion_pulses_since_reset = 0
+            self.state.motion_pulses_since_arm = 0
+            now = now_s()
+            self.state.arm_ts = now
+            self.state.last_pulse_ts = now
+            self._reset_pulse_tracking()
+            self._stall_next_idx = 0
+            self.state.mode = MonitorMode.ARMED
+            self.logger.emit("rearmed")
+            # A runout still asserted after the operator intervention must pause again.
+            if self._runout_asserted_now():
+                self.state.runout_asserted = True
+                self.logger.emit("runout_asserted")
+                self._trigger_pause("runout")
 
     def _send_gcode(self, gcode):
         """Send a single G-code line over serial (adds newline and flushes)."""
@@ -602,6 +620,13 @@ class FilamentMonitor:
         Args:
             reason: Short string describing the fault (e.g. 'jam', 'runout').
         """
+        # Serialized with every state transition: the socket/button threads
+        # cannot reset/disable between the checks below and the latch+send.
+        with self._state_lock:
+            self._trigger_pause_locked(reason)
+
+    def _trigger_pause_locked(self, reason):
+        """Body of _trigger_pause; caller holds _state_lock."""
         # Idempotency: if already latched, do nothing (prevents duplicate pause/notify).
         if self.state.latched:
             return
@@ -666,7 +691,7 @@ class FilamentMonitor:
         if now - self.state.last_pulse_ts >= timeout_s:
             self._trigger_pause("jam")
     def _handle_control_marker(self, line):
-        """Handle a decoded control marker.
+        """Handle a decoded control marker (serialized under _state_lock).
 
         Markers are the only control plane for arming/pausing decisions. Jam/runout
         detection is *only* active when explicitly armed via `filmon:arm`.
@@ -678,62 +703,63 @@ class FilamentMonitor:
             filmon:unarm    - keep enabled but disarm detection
             filmon:disable  - disable monitoring
         """
-        low = line.lower()
+        with self._state_lock:
+            low = line.lower()
 
-        # NOTE: reset always wins.
-        if CONTROL_RESET in low:
-            self.state.mode = MonitorMode.DISABLED
-            self.state.latched = False
-            self.state.runout_asserted = False
-            self.state.motion_pulses_since_reset = 0
-            self.state.last_pulse_ts = now_s()
-            self.state.motion_pulses_since_arm = 0
-            self.state.arm_ts = 0.0
-            self._reset_pulse_tracking()
-            self.logger.emit("reset")
-            return
+            # NOTE: reset always wins.
+            if CONTROL_RESET in low:
+                self.state.mode = MonitorMode.DISABLED
+                self.state.latched = False
+                self.state.runout_asserted = False
+                self.state.motion_pulses_since_reset = 0
+                self.state.last_pulse_ts = now_s()
+                self.state.motion_pulses_since_arm = 0
+                self.state.arm_ts = 0.0
+                self._reset_pulse_tracking()
+                self.logger.emit("reset")
+                return
 
-        # Ignore state transitions while latched except reset (handled above).
-        if self.state.latched:
-            return
+            # Ignore state transitions while latched except reset (handled above).
+            if self.state.latched:
+                return
 
-        if CONTROL_DISABLE in low:
-            self.state.mode = MonitorMode.DISABLED
-            self.logger.emit("disabled")
-            return
+            if CONTROL_DISABLE in low:
+                self.state.mode = MonitorMode.DISABLED
+                self.logger.emit("disabled")
+                return
 
-        if CONTROL_UNARM in low:
-            # Idempotent: unarming should not reset counters.
-            self.state.mode = MonitorMode.ENABLED
-            self._stall_next_idx = 0
-            self.logger.emit("unarmed")
-            return
+            if CONTROL_UNARM in low:
+                # Idempotent: unarming should not reset counters.
+                self.state.mode = MonitorMode.ENABLED
+                self._stall_next_idx = 0
+                self.logger.emit("unarmed")
+                return
 
-        if CONTROL_ARM in low:
-            # Start timeout reference at arm time to avoid an immediate jam.
-            self.state.mode = MonitorMode.ARMED
-            self.state.motion_pulses_since_arm = 0
-            self.state.arm_ts = now_s()
-            self.state.last_pulse_ts = self.state.arm_ts
-            self._stall_next_idx = 0
-            self.logger.emit("armed")
-            # A runout that occurred while unarmed must still pause once armed.
-            if self._runout_asserted_now():
-                self.state.runout_asserted = True
-                self.logger.emit("runout_asserted")
-                self._trigger_pause("runout")
-            return
+            if CONTROL_ARM in low:
+                # Start timeout reference at arm time to avoid an immediate jam.
+                self.state.mode = MonitorMode.ARMED
+                self.state.motion_pulses_since_arm = 0
+                self.state.arm_ts = now_s()
+                self.state.last_pulse_ts = self.state.arm_ts
+                self._stall_next_idx = 0
+                self.logger.emit("armed")
+                # A runout that occurred while unarmed must still pause once armed.
+                if self._runout_asserted_now():
+                    self.state.runout_asserted = True
+                    self.logger.emit("runout_asserted")
+                    self._trigger_pause("runout")
+                return
 
-        if CONTROL_ENABLE in low:
-            # Enable only; never arms automatically. Idempotent and does not reset counters.
-            if self.state.mode == MonitorMode.ENABLED:
+            if CONTROL_ENABLE in low:
+                # Enable only; never arms automatically. Idempotent and does not reset counters.
+                if self.state.mode == MonitorMode.ENABLED:
+                    self.logger.emit("enabled")
+                    return
+                self.state.mode = MonitorMode.ENABLED
+                self.state.last_pulse_ts = now_s()
+                self._stall_next_idx = 0
                 self.logger.emit("enabled")
                 return
-            self.state.mode = MonitorMode.ENABLED
-            self.state.last_pulse_ts = now_s()
-            self._stall_next_idx = 0
-            self.logger.emit("enabled")
-            return
 
     def start(self):
         """Start GPIO monitoring and the main loop (and serial reader if configured)."""
