@@ -22,6 +22,7 @@ from .doctor import (
     resolved_config_dict,
     validate_args,
 )
+from .gpio import init_gpio
 from .logging import JsonLogger
 from .monitor import FilamentMonitor
 from .state import MonitorState
@@ -94,6 +95,18 @@ def main():
         ignored_runout_flags = [f for f in ignored_runout_flags if f != "--runout-gpio"]
     if ignored_runout_flags:
         print("WARNING: runout monitoring is disabled; ignoring: " + ", ".join(ignored_runout_flags))
+
+    # Real GPIO is required beyond this point (--doctor, --self-test, and
+    # normal monitoring all read pins). --print-config and --version above
+    # stay GPIO-free. Refuse to run on the no-op stub: a daemon that monitors
+    # nothing would false-jam every print.
+    if init_gpio() == "stub":
+        print(
+            "ERROR: no usable GPIO backend (gpiozero is not installed). "
+            "Install gpiozero and lgpio to run on hardware.",
+            file=sys.stderr,
+        )
+        return 2
 
     # Doctor mode is GPIO-first and must work without pyserial installed
     # (its serial echo check is optional and non-fatal).

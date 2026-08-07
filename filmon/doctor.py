@@ -92,7 +92,9 @@ def run_doctor(args):
 
     runout = None
     if args.runout_enabled:
-        runout = DigitalInputDevice(args.runout_gpio, pull_up=True)
+        # pull_up=not active_high makes gpiozero's "active" mean asserted for
+        # both polarities, so value == 1 always reads as "filament absent".
+        runout = DigitalInputDevice(args.runout_gpio, pull_up=not args.runout_active_high)
 
     last_runout = None
     last_print = time.monotonic()
@@ -106,8 +108,9 @@ def run_doctor(args):
         debounce_s = float(getattr(args, "rearm_button_debounce", 0.25) or 0.25)
 
         def is_pressed(dev):
-            v = dev.value
-            return (v == 1) if active_high else (v == 0)
+            # value is 1 when active; the pull_up choice below makes gpiozero's
+            # "active" mean pressed for both wirings.
+            return dev.value == 1
 
         def wait_for_state(dev, pressed: bool, timeout_s: float):
             deadline = time.monotonic() + timeout_s
@@ -123,7 +126,7 @@ def run_doctor(args):
         print("  This test is read-only: it does not change monitor state or send any G-code.")
         print()
 
-        btn = DigitalInputDevice(button_gpio, pull_up=True)
+        btn = DigitalInputDevice(button_gpio, pull_up=not active_high)
 
         # Ensure button starts released
         if is_pressed(btn):
@@ -199,7 +202,8 @@ def run_doctor(args):
         while True:
             if time.monotonic() - last_print >= 0.5:
                 if runout is not None:
-                    asserted = (runout.value == 1) if args.runout_active_high else (runout.value == 0)
+                    # value is polarity-normalized by the pull_up choice above.
+                    asserted = (runout.value == 1)
                     if asserted != last_runout:
                         print(f"  RUNOUT asserted={asserted}")
                         last_runout = asserted
@@ -247,13 +251,15 @@ def run_self_test(args):
     if not args.runout_enabled:
         print("  Runout test: skipped (runout disabled)")
     else:
-        runout = DigitalInputDevice(args.runout_gpio, pull_up=True)
+        # pull_up=not active_high makes gpiozero's "active" mean asserted for
+        # both polarities, so value == 1 always reads as "filament absent".
+        runout = DigitalInputDevice(args.runout_gpio, pull_up=not args.runout_active_high)
         print("  Toggle runout (insert/remove) for 5 seconds...")
         last = None
         changes = 0
         t0 = time.monotonic()
         while time.monotonic() - t0 < 5.0:
-            asserted = (runout.value == 1) if args.runout_active_high else (runout.value == 0)
+            asserted = (runout.value == 1)
             if last is None:
                 last = asserted
             elif asserted != last:

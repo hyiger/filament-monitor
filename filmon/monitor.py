@@ -114,13 +114,12 @@ class FilamentMonitor:
         self._last_runout_edge = 0.0
 
         if runout_gpio is not None:
-            self.runout = self._DigitalInputDevice(runout_gpio, pull_up=True)
-            if runout_active_high:
-                self.runout.when_activated   = self._on_runout_asserted
-                self.runout.when_deactivated = self._on_runout_cleared
-            else:
-                self.runout.when_deactivated = self._on_runout_asserted
-                self.runout.when_activated   = self._on_runout_cleared
+            # Let gpiozero normalize polarity: with pull_up=not active_high,
+            # "active" always means the switch is asserted (filament absent),
+            # so the callbacks map unconditionally for both wirings.
+            self.runout = self._DigitalInputDevice(runout_gpio, pull_up=not runout_active_high)
+            self.runout.when_activated   = self._on_runout_asserted
+            self.runout.when_deactivated = self._on_runout_cleared
 
 
         # Optional physical "rearm" button. Lets you re-arm without sharing the
@@ -137,17 +136,12 @@ class FilamentMonitor:
             #
             # Active-low (recommended): enable pull-up, press shorts to GND.
             # Active-high: enable pull-down (pull_up=False), press drives pin high.
+            # With pull_up=not active_high, gpiozero's "active" means pressed for
+            # both wirings, so the callbacks map unconditionally.
             pull_up = not self.rearm_button_active_high
             self.rearm_button = self._DigitalInputDevice(rearm_button_gpio, pull_up=pull_up)
-
-            if self.rearm_button_active_high:
-                # press = activated (high), release = deactivated
-                self.rearm_button.when_activated = self._on_rearm_button_press
-                self.rearm_button.when_deactivated = self._on_rearm_button_release
-            else:
-                # press = deactivated (low), release = activated
-                self.rearm_button.when_deactivated = self._on_rearm_button_press
-                self.rearm_button.when_activated = self._on_rearm_button_release
+            self.rearm_button.when_activated = self._on_rearm_button_press
+            self.rearm_button.when_deactivated = self._on_rearm_button_release
 
 
         self._ser = None
@@ -363,6 +357,50 @@ class FilamentMonitor:
         if self.state.mode == MonitorMode.ARMED:
             self.logger.emit("runout_cleared")
 
+    def _runout_asserted_now(self) -> bool:
+        """Return True if the runout condition currently holds.
+
+        Prefers the live device level (is_active is polarity-normalized by the
+        pull_up choice at construction); falls back to the tracked state when
+        the device exposes no level (e.g. test stubs). False when runout
+        monitoring is disabled.
+        """
+        if self.runout is None:
+            return False
+        is_active = getattr(self.runout, "is_active", None)
+        if is_active is None:
+            return bool(self.state.runout_asserted)
+        return bool(is_active)
+
+    def _reconcile_runout(self):
+        """Sync tracked runout state to the live pin level once debounce settles.
+
+        Edge callbacks inside the debounce window are discarded, so a chatter
+        burst whose final edge is swallowed can leave state.runout_asserted
+        stale. Called from the main loop; once the quiet period has elapsed
+        since the last edge, re-sample the level and reconcile.
+        """
+        if self.runout is None:
+            return
+        is_active = getattr(self.runout, "is_active", None)
+        if is_active is None:
+            return
+        now = now_s()
+        if self.runout_debounce_s and (now - self._last_runout_edge) < self.runout_debounce_s:
+            return
+        level = bool(is_active)
+        if level == self.state.runout_asserted:
+            return
+        self.state.runout_asserted = level
+        if self.state.mode != MonitorMode.ARMED:
+            return
+        if level:
+            self.logger.emit("runout_asserted")
+            if not self.state.latched:
+                self._trigger_pause("runout")
+        else:
+            self.logger.emit("runout_cleared")
+
     def attach_serial(self, ser):
         """Attach an already-open serial port to the monitor."""
         self._ser = ser
@@ -511,8 +549,9 @@ class FilamentMonitor:
         the print. This does not require a second serial connection.
         """
         # Clear latch and counters, then arm with a fresh timeout reference.
+        # Note: runout_asserted is intentionally preserved so a still-standing
+        # runout re-pauses below instead of being silently forgotten.
         self.state.latched = False
-        self.state.runout_asserted = False
         self.state.motion_pulses_since_reset = 0
         self.state.motion_pulses_since_arm = 0
         now = now_s()
@@ -522,6 +561,11 @@ class FilamentMonitor:
         self._stall_next_idx = 0
         self.state.mode = MonitorMode.ARMED
         self.logger.emit("rearmed")
+        # A runout still asserted after the operator intervention must pause again.
+        if self._runout_asserted_now():
+            self.state.runout_asserted = True
+            self.logger.emit("runout_asserted")
+            self._trigger_pause("runout")
 
     def _send_gcode(self, gcode):
         """Send a single G-code line over serial (adds newline and flushes)."""
@@ -647,6 +691,11 @@ class FilamentMonitor:
             self.state.last_pulse_ts = self.state.arm_ts
             self._stall_next_idx = 0
             self.logger.emit("armed")
+            # A runout that occurred while unarmed must still pause once armed.
+            if self._runout_asserted_now():
+                self.state.runout_asserted = True
+                self.logger.emit("runout_asserted")
+                self._trigger_pause("runout")
             return
 
         if CONTROL_ENABLE in low:
@@ -679,6 +728,7 @@ class FilamentMonitor:
                 self._handle_control_marker(line)
             except queue.Empty:
                 pass
+            self._reconcile_runout()
             self._maybe_jam()
             self._maybe_breadcrumbs()
 

@@ -138,9 +138,10 @@ def test_rearm_button_is_active_low_with_pullup(monkeypatch):
     assert mon.rearm_button is not None
     assert mon.rearm_button.pin == 25
     assert mon.rearm_button.pull_up is True
-    # For active-low: press=when_deactivated, release=when_activated
-    assert callable(mon.rearm_button.when_deactivated)
-    assert callable(mon.rearm_button.when_activated)
+    # With pull_up=True, gpiozero's "active" means pressed (pin low), so the
+    # mapping is press=when_activated, release=when_deactivated even active-low.
+    assert mon.rearm_button.when_activated == mon._on_rearm_button_press
+    assert mon.rearm_button.when_deactivated == mon._on_rearm_button_release
 
     mon.stop()
 
