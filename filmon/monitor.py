@@ -609,6 +609,10 @@ class FilamentMonitor:
                 if consecutive_accept_errors >= 5:
                     stop_reason = "accept_errors"
                     break
+                # Back off before retrying: fd-exhaustion errors like EMFILE
+                # need time to clear — immediate retries would burn the whole
+                # budget against the same still-exhausted condition.
+                self._control_stop_evt.wait(0.5 * consecutive_accept_errors)
                 continue
             consecutive_accept_errors = 0
 
