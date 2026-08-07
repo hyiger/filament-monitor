@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-VERSION = "1.0.4"
+VERSION = "1.1.0"
 
 CONTROL_ENABLE = "filmon:enable"
 CONTROL_DISABLE = "filmon:disable"
