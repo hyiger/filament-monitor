@@ -423,8 +423,10 @@ def validate_args(args):
         )
 
     # An omitted debounce means "no debounce": normalize to 0.0 so the
-    # monitor's elapsed-time comparison never sees None.
-    if args.runout_debounce is None:
+    # monitor's elapsed-time comparison never sees None. Only when runout is
+    # enabled — while disabled, a non-None value would make the guardrails
+    # warn about a --runout-debounce the user never supplied.
+    if args.runout_enabled and args.runout_debounce is None:
         args.runout_debounce = 0.0
 
     for name in ("runout_debounce", "rearm_button_debounce", "arm_grace_s", "breadcrumb_interval"):

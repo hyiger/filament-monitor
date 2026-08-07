@@ -258,3 +258,12 @@ def test_non_finite_stall_thresholds_rejected(tmp_path):
     cfg.write_text('[logging]\nstall_thresholds = "nan,3,6"\n')
     with pytest.raises(SystemExit, match="finite"):
         parse_config(["--config", str(cfg)])
+
+
+def test_omitted_debounce_stays_none_while_runout_disabled(tmp_path):
+    """Normalizing the omitted debounce must not make default startups warn
+    about a --runout-debounce nobody supplied (Codex round-3 review)."""
+    args = parse_config([])
+    assert args.runout_debounce is None
+    from filmon.doctor import apply_runout_guardrails
+    assert "--runout-debounce" not in apply_runout_guardrails(args)
