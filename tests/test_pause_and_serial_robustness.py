@@ -296,3 +296,44 @@ def test_trigger_pause_race_sends_single_pause(monkeypatch):
         assert ser.writes == ["M400\n", "M600\n"]
         assert len(mon.notifier.calls) == 1
         assert logger.names().count("pause_triggered") == 1
+
+
+class M400OnlyFailsSerial:
+    """Serial whose write fails ONLY for M400 (pause line succeeds)."""
+    def __init__(self):
+        self.writes = []
+
+    def write(self, data: bytes):
+        text = data.decode(errors="replace")
+        if text.startswith("M400"):
+            raise OSError("write failed: M400 dropped")
+        self.writes.append(text)
+
+    def flush(self):
+        pass
+
+
+def test_pause_delivered_when_only_m400_fails(monkeypatch):
+    """Delivery is judged by the pause line alone: a failed M400 with a
+    delivered M600 must NOT trigger retries — each retry would queue another
+    filament change (Codex review on #39/#41)."""
+    m, mon, logger, notifier = _make_monitor(monkeypatch, jam_timeout_s=1.0)
+    mon.attach_serial(M400OnlyFailsSerial())
+    t = {"now": 3000.0}
+    monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
+
+    mon._handle_control_marker("filmon:arm")
+    t["now"] += 2.0
+    mon._maybe_jam()
+
+    assert mon.state.latched is True
+    assert mon.state.pause_delivered is True
+    assert [w for w in mon._ser.writes if "M600" in w], "pause line must be sent"
+    assert "gcode_send_failed" in logger.names()  # the M400 failure is still logged
+
+    # No retry: advance past the retry interval and run the retry hook.
+    writes_before = list(mon._ser.writes)
+    t["now"] += 10.0
+    mon._maybe_pause_retry()
+    assert mon._ser.writes == writes_before
+    assert "pause_retry" not in logger.names()

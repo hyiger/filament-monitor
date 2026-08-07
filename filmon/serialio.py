@@ -40,6 +40,7 @@ class SerialThread(threading.Thread):
         state=None,
         on_reconnect=None,
         serial_factory=None,
+        ser_lock=None,
     ):
         """Create the serial reader thread.
 
@@ -56,6 +57,8 @@ class SerialThread(threading.Thread):
                 instance so the monitor can swap it in under its write lock.
             serial_factory: Optional callable (port, baud) -> Serial used to
                 reopen the port (tests inject fakes here).
+            ser_lock: The monitor's serial write lock. Closing the dead port
+                takes it so a close can never interleave a pause write.
         """
         super().__init__(daemon=True)
         self.ser = ser
@@ -68,6 +71,7 @@ class SerialThread(threading.Thread):
         self.state = state
         self.on_reconnect = on_reconnect
         self.serial_factory = serial_factory or _default_serial_factory
+        self.ser_lock = ser_lock
 
     def run(self):
         """Thread entry point. Reads serial lines until stopped, reconnecting on errors."""
@@ -96,10 +100,20 @@ class SerialThread(threading.Thread):
 
         Returns True once reconnected; False if stop_evt was set first."""
         self._set_connected(False)
-        try:
-            self.ser.close()
-        except Exception:
-            pass
+        # Close under the monitor's write lock: closing mid-_send_gcode would
+        # otherwise tear a pause write (undefined in pyserial) and leave the
+        # M400/M600 sequence ambiguously delivered.
+        if self.ser_lock is not None:
+            with self.ser_lock:
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+        else:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
 
         attempt = 0
         while not self.stop_evt.is_set():

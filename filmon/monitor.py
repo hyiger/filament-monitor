@@ -504,6 +504,7 @@ class FilamentMonitor:
             baud=baud or self.state.baud,
             state=self.state,
             on_reconnect=self.attach_serial,
+            ser_lock=self._ser_lock,
         )
         t.start()
         self._serial_thread = t
@@ -677,9 +678,14 @@ class FilamentMonitor:
         try:
             # Serial can be written from the main loop and GPIO callbacks.
             # Keep writes atomic to avoid interleaving lines.
+            #
+            # No flush(): write() is bounded by write_timeout, but flush()
+            # (tcdrain) has no timeout and can block the monitor loop forever
+            # while a wedged printer stops draining its CDC buffer — the exact
+            # case the pause-retry path exists for. The OS transmits the
+            # buffered bytes asynchronously.
             with self._ser_lock:
                 self._ser.write((gcode + "\n").encode())
-                self._ser.flush()
         except _SERIAL_WRITE_ERRORS as e:
             self.logger.emit("gcode_send_failed", gcode=gcode, error=str(e))
             return False
@@ -687,13 +693,15 @@ class FilamentMonitor:
         return True
 
     def _send_pause_gcode(self) -> bool:
-        """Send the pause sequence (M400 drain, then pause G-code).
+        """Send the pause sequence (best-effort M400 drain, then pause G-code).
 
-        Returns True only when both lines were delivered. Both are always
-        attempted so a recovered port gets the full sequence."""
-        drained = self._send_gcode("M400")  # ensure the planner is drained before pausing
+        Delivery is judged by the pause line ALONE: retrying because only the
+        M400 failed would queue duplicate M600s / re-run a non-idempotent
+        pause macro on a printer that is already paused. A failed M400 is
+        still logged by _send_gcode."""
+        self._send_gcode("M400")  # best-effort planner drain before pausing
         paused = self._send_gcode(self.pause_gcode)
-        delivered = bool(drained and paused)
+        delivered = bool(paused)
         self._pause_delivered = delivered
         self.state.pause_delivered = delivered
         self._pause_last_attempt_ts = now_s()
