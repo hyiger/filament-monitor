@@ -72,6 +72,29 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now filament-monitor.service
 ```
 
+### Failure handling and exit codes
+
+The daemon is designed to recover from transient faults on its own and to fail fast
+(so systemd can restart it) when it cannot:
+
+- **Serial read errors** trigger reconnect-with-backoff. Each failed read logs a
+  `serial_read_error` event; a successful reconnect logs `serial_reconnected`.
+- **Pause delivery is retried.** When a fault fires, the monitor sends `M400` followed by the
+  pause G-code and retries until delivery succeeds, logging `pause_gcode_failed` and
+  `pause_retry` along the way. A failed non-pause write logs `gcode_send_failed`.
+- **Main-loop failures are fatal by design.** An unexpected exception in the monitor loop logs
+  `monitor_loop_error` and the daemon exits so systemd can restart it cleanly.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Clean shutdown (SIGINT/SIGTERM) |
+| 3 | Serial reader died and could not be recovered |
+| 4 | Monitor main loop crashed (`monitor_loop_error`) |
+
+The bundled unit sets `Restart=on-failure`, so both fault exits (3 and 4) trigger an automatic restart.
+
 ## Known limitations
 - **Sensor resolution at ultra-low flow.** Pulse-based sensors (e.g. BTT SFS v2.0 at ~2.88 mm/pulse) can have long legitimate gaps
   between pulses when extrusion is extremely slow or highly segmented. In these regimes, time-based “no pulses for N seconds” detection

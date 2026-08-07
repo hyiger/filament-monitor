@@ -21,9 +21,15 @@ The project defaults are chosen to work with a [BTT SFS V2.0 Smart Filament Sens
 This monitor is intentionally conservative:
 
 - False positives are considered worse than delayed detection
-- Monitoring must be explicitly enabled via slicer or G-code markers
-- Motion expectation is derived from *actual commanded extrusion*
-- Jam detection requires multiple invariants to be violated simultaneously
+- Detection is **marker-driven**: monitoring must be explicitly enabled and armed
+  via slicer or G-code markers (`filmon:enable` / `filmon:arm`); the monitor never
+  arms itself and never watches for faults outside the armed window
+- Jam detection is a **pulse-silence timeout**: while armed, a jam is declared when
+  no motion pulses arrive for longer than the jam timeout (the monitor does not
+  parse commanded extrusion from the G-code stream)
+- The timeout can optionally **adapt** to the recent pulse rate (clamped between a
+  configured min and max), and an optional post-arm **grace gate** suppresses
+  latching immediately after (re)arming
 
 The goal is predictable, reviewable behavior rather than aggressive detection.
 
@@ -94,4 +100,17 @@ You can test notifications without inducing a jam or runout using:
 ./filmonctl.py test-notify
 ```
 
-This sends a one-time test notification using the configured credentials.
+`test-notify` is routed through the daemon's control socket, so the daemon sends
+the notification using the credentials it was started with (e.g. the
+`Environment=` lines in the systemd unit above). This verifies the exact
+configuration that real jam/runout notifications will use.
+
+To test Pushover credentials from your local shell environment instead (no
+running daemon required), use:
+
+```
+./filmonctl.py test-notify-local
+```
+
+This reads `PUSHOVER_TOKEN` / `PUSHOVER_USER` from the client's environment,
+which is useful for validating credentials before configuring the service.

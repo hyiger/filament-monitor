@@ -3,8 +3,6 @@ import math
 from pathlib import Path
 from typing import List
 
-import pytest
-
 from builtins import DummyGPIO
 from filmon.state import MonitorMode
 
@@ -83,7 +81,6 @@ class DummyDigitalInputDevice:
         pass
 
 
-@pytest.mark.integration
 def test_marlin_like_serial_stream_gpio_activity_rearm_then_runout(monkeypatch):
     """Log-aligned integration test (in-process).
 

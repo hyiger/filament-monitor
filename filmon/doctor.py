@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import math
 import json
 import os
 import queue
@@ -29,14 +30,55 @@ from .serialio import serial
 from .util import now_s
 from .constants import VERSION, CONTROL_ENABLE, CONTROL_DISABLE, CONTROL_RESET, CONTROL_ARM, CONTROL_UNARM, USAGE_EXAMPLES
 
+def _serial_echo_check(port, baud, timeout_s: float = 5.0) -> bool:
+    """Send an M118 A1 marker and wait for the printer to echo it back.
+
+    Shared by --doctor (optional, non-fatal) and --self-test. Returns True when
+    the echo is observed within timeout_s.
+    """
+    # write_timeout bounds the probe write; no flush() — tcdrain has no
+    # timeout and a printer that stopped draining its CDC buffer would hang
+    # the diagnostic before the GPIO checks ever ran.
+    ser = serial.Serial(port, baud, timeout=0.5, write_timeout=2.0)
+    try:
+        token = f"filmon:selftest {int(time.time())}"
+        ser.write(f"M118 A1 {token}\n".encode())
+        print("  Sent:", token)
+        print("  Waiting for echo...")
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            line = ser.readline().decode(errors="replace").strip()
+            if token.lower() in line.lower():
+                return True
+        return False
+    finally:
+        ser.close()
+
+
 def run_doctor(args):
-    """Run environment checks (serial access, GPIO availability) and print diagnostics."""
+    """Run environment checks (GPIO availability, optional serial echo) and print diagnostics."""
     print("Doctor Mode (safe):")
     print("  - No M600 is sent.")
     print("  - Move filament to generate motion pulses.")
     print("  - Toggle runout to test runout.")
     print("  Ctrl+C to exit.")
     print()
+
+    # Optional serial echo check (non-fatal). Runs only when -p/--port is given;
+    # doctor mode remains usable without pyserial or a connected printer.
+    if getattr(args, "port", None):
+        print("Serial Echo Check (M118 A1):")
+        if serial is None:
+            print("  WARN: pyserial is not installed; skipping serial echo check.")
+        else:
+            try:
+                if _serial_echo_check(args.port, args.baud):
+                    print("  OK: echo seen")
+                else:
+                    print("  WARN: no echo observed")
+            except Exception as e:
+                print(f"  WARN: serial echo check failed: {e}")
+        print()
 
     motion = DigitalInputDevice(args.motion_gpio, pull_up=True)
     pulse_count = 0
@@ -50,7 +92,9 @@ def run_doctor(args):
 
     runout = None
     if args.runout_enabled:
-        runout = DigitalInputDevice(args.runout_gpio, pull_up=True)
+        # pull_up=not active_high makes gpiozero's "active" mean asserted for
+        # both polarities, so value == 1 always reads as "filament absent".
+        runout = DigitalInputDevice(args.runout_gpio, pull_up=not args.runout_active_high)
 
     last_runout = None
     last_print = time.monotonic()
@@ -64,8 +108,9 @@ def run_doctor(args):
         debounce_s = float(getattr(args, "rearm_button_debounce", 0.25) or 0.25)
 
         def is_pressed(dev):
-            v = dev.value
-            return (v == 1) if active_high else (v == 0)
+            # value is 1 when active; the pull_up choice below makes gpiozero's
+            # "active" mean pressed for both wirings.
+            return dev.value == 1
 
         def wait_for_state(dev, pressed: bool, timeout_s: float):
             deadline = time.monotonic() + timeout_s
@@ -81,7 +126,7 @@ def run_doctor(args):
         print("  This test is read-only: it does not change monitor state or send any G-code.")
         print()
 
-        btn = DigitalInputDevice(button_gpio, pull_up=True)
+        btn = DigitalInputDevice(button_gpio, pull_up=not active_high)
 
         # Ensure button starts released
         if is_pressed(btn):
@@ -157,7 +202,8 @@ def run_doctor(args):
         while True:
             if time.monotonic() - last_print >= 0.5:
                 if runout is not None:
-                    asserted = (runout.value == 1) if args.runout_active_high else (runout.value == 0)
+                    # value is polarity-normalized by the pull_up choice above.
+                    asserted = (runout.value == 1)
                     if asserted != last_runout:
                         print(f"  RUNOUT asserted={asserted}")
                         last_runout = asserted
@@ -171,29 +217,17 @@ def run_doctor(args):
 
 
 def run_self_test(args):
-    """Exercise the monitor control-marker path and basic state transitions."""
+    """Safe hardware check: serial M118 echo round-trip plus pulse/runout observation.
+
+    Does not construct the monitor and never sends pause G-code.
+    """
     if not args.port:
         raise SystemExit("--self-test requires -p/--port")
 
-    ser = serial.Serial(args.port, args.baud, timeout=0.5)
-    token = f"filmon:selftest {int(time.time())}"
-    ser.write(f"M118 A1 {token}\n".encode())
-    ser.flush()
-
     print("Self-Test")
-    print("  Sent:", token)
-    print("  Waiting for echo...")
-
-    deadline = time.monotonic() + 5.0
-    echoed = False
-    while time.monotonic() < deadline:
-        line = ser.readline().decode(errors="replace").strip()
-        if token.lower() in line.lower():
-            echoed = True
-            print("  OK: echo seen")
-            break
-
-    if not echoed:
+    if _serial_echo_check(args.port, args.baud):
+        print("  OK: echo seen")
+    else:
         print("  WARN: no echo observed")
 
     # Motion pulse test
@@ -217,13 +251,15 @@ def run_self_test(args):
     if not args.runout_enabled:
         print("  Runout test: skipped (runout disabled)")
     else:
-        runout = DigitalInputDevice(args.runout_gpio, pull_up=True)
+        # pull_up=not active_high makes gpiozero's "active" mean asserted for
+        # both polarities, so value == 1 always reads as "filament absent".
+        runout = DigitalInputDevice(args.runout_gpio, pull_up=not args.runout_active_high)
         print("  Toggle runout (insert/remove) for 5 seconds...")
         last = None
         changes = 0
         t0 = time.monotonic()
         while time.monotonic() - t0 < 5.0:
-            asserted = (runout.value == 1) if args.runout_active_high else (runout.value == 0)
+            asserted = (runout.value == 1)
             if last is None:
                 last = asserted
             elif asserted != last:
@@ -237,7 +273,6 @@ def run_self_test(args):
         else:
             print(f"  OK: runout transitions observed ({changes}).")
 
-    ser.close()
     print("Self-test complete.")
 
 
@@ -293,6 +328,147 @@ def config_defaults_from(cfg: dict) -> dict:
     }
 
 
+# Numeric argument fields coerced during validation. CLI values are already
+# typed by argparse; these coercions catch untyped TOML values.
+_INT_ARG_KEYS = (
+    "baud",
+    "motion_gpio",
+    "runout_gpio",
+    "rearm_button_gpio",
+    "arm_min_pulses",
+    "arm_grace_pulses",
+)
+_FLOAT_ARG_KEYS = (
+    "runout_debounce",
+    "rearm_button_debounce",
+    "rearm_button_long_press",
+    "jam_timeout",
+    "jam_timeout_min",
+    "jam_timeout_max",
+    "jam_timeout_k",
+    "jam_timeout_pps_floor",
+    "jam_timeout_ema_halflife",
+    "arm_grace_s",
+    "breadcrumb_interval",
+    "pulse_window",
+)
+# Boolean fields whose TOML values must be real booleans: a quoted
+# "false" is a non-empty (truthy) string and would silently invert intent.
+_BOOL_ARG_KEYS = (
+    "runout_enabled",
+    "runout_active_high",
+    "rearm_button_active_high",
+    "jam_timeout_adaptive",
+    "verbose",
+    "no_banner",
+    "json",
+)
+
+
+def validate_args(args):
+    """Coerce numeric values and fail fast on invalid configuration.
+
+    TOML values reach argparse as untyped defaults, so numeric fields are
+    coerced with int()/float() here. Non-numeric values and inconsistent
+    combinations raise SystemExit with a clear message instead of surfacing
+    as confusing behavior deep inside the monitor.
+    """
+    def _coerce(name, conv):
+        v = getattr(args, name, None)
+        if v is None:
+            return None
+        # Reject TOML booleans: bool is an int subclass but not a valid pin/timeout number.
+        if isinstance(v, bool):
+            raise SystemExit(f"Invalid value for {name}: {v!r} (expected a number)")
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            raise SystemExit(f"Invalid value for {name}: {v!r} (expected a number)")
+        # nan/inf are valid TOML floats but poison every timeout comparison
+        # (elapsed >= nan is always False -> detection silently disabled).
+        if not math.isfinite(f):
+            raise SystemExit(f"Invalid value for {name}: {v!r} (must be a finite number)")
+        # Integer fields must be integral: motion_gpio = 26.9 must not become pin 26.
+        if conv is int and f != int(f):
+            raise SystemExit(f"Invalid value for {name}: {v!r} (expected an integer)")
+        v = conv(f)
+        setattr(args, name, v)
+        return v
+
+    for name in _INT_ARG_KEYS:
+        _coerce(name, int)
+    for name in _FLOAT_ARG_KEYS:
+        _coerce(name, float)
+
+    for name in _BOOL_ARG_KEYS:
+        v = getattr(args, name, None)
+        if v is not None and not isinstance(v, bool):
+            raise SystemExit(f"Invalid value for {name}: {v!r} (expected true or false)")
+
+    if args.jam_timeout is not None and args.jam_timeout <= 0:
+        raise SystemExit(f"jam_timeout must be > 0 (got {args.jam_timeout})")
+
+    # Adaptive-timeout parameters must be positive: a zero/negative clamp or
+    # coefficient makes the effective timeout <= 0, i.e. an instant false jam.
+    if args.jam_timeout_min <= 0 or args.jam_timeout_max <= 0:
+        raise SystemExit(
+            f"jam_timeout_min/jam_timeout_max must be > 0 (got {args.jam_timeout_min}/{args.jam_timeout_max})"
+        )
+    if args.jam_timeout_k <= 0:
+        raise SystemExit(f"jam_timeout_k must be > 0 (got {args.jam_timeout_k})")
+    if args.jam_timeout_pps_floor <= 0:
+        raise SystemExit(f"jam_timeout_pps_floor must be > 0 (got {args.jam_timeout_pps_floor})")
+    if args.jam_timeout_ema_halflife < 0:
+        raise SystemExit(f"jam_timeout_ema_halflife must be >= 0 (got {args.jam_timeout_ema_halflife})")
+    if getattr(args, "jam_timeout_adaptive", False) and args.pulse_window <= 0:
+        raise SystemExit("jam_timeout_adaptive requires pulse_window > 0 (pps is measured over that window)")
+
+    if args.jam_timeout_min > args.jam_timeout_max:
+        raise SystemExit(
+            f"jam_timeout_min ({args.jam_timeout_min}) must be <= jam_timeout_max ({args.jam_timeout_max})"
+        )
+
+    # An omitted debounce means "no debounce": normalize to 0.0 so the
+    # monitor's elapsed-time comparison never sees None. Only when runout is
+    # enabled — while disabled, a non-None value would make the guardrails
+    # warn about a --runout-debounce the user never supplied.
+    if args.runout_enabled and args.runout_debounce is None:
+        args.runout_debounce = 0.0
+
+    for name in ("runout_debounce", "rearm_button_debounce", "arm_grace_s", "breadcrumb_interval"):
+        v = getattr(args, name, None)
+        if v is not None and v < 0:
+            raise SystemExit(f"{name} must be >= 0 (got {v})")
+
+    # A non-positive long-press threshold would classify EVERY release as a
+    # long press, turning the documented short-press reset into a rearm.
+    if args.rearm_button_long_press is not None and args.rearm_button_long_press <= 0:
+        raise SystemExit(f"rearm_button_long_press must be > 0 (got {args.rearm_button_long_press})")
+
+    pg = getattr(args, "pause_gcode", None)
+    if pg is not None and (not isinstance(pg, str) or not pg.strip()):
+        raise SystemExit(f"pause_gcode must be a non-empty G-code string (got {pg!r})")
+
+    if args.arm_grace_pulses is not None and args.arm_grace_pulses < 0:
+        raise SystemExit(f"arm_grace_pulses must be >= 0 (got {args.arm_grace_pulses})")
+
+    # stall_thresholds must be a comma-separated list of numbers (e.g. "3,6").
+    st = getattr(args, "stall_thresholds", None)
+    if st:
+        try:
+            parsed = [float(x.strip()) for x in str(st).split(",") if x.strip()]
+        except ValueError:
+            raise SystemExit(
+                f"Invalid stall_thresholds {st!r}: expected comma-separated seconds, e.g. \"3,6\""
+            )
+        # A nan entry wedges the stall breadcrumb index (comparisons with nan
+        # never succeed), silencing all later thresholds.
+        if any(not math.isfinite(x) for x in parsed):
+            raise SystemExit(f"Invalid stall_thresholds {st!r}: entries must be finite numbers")
+
+    return args
+
+
 def resolved_config_dict(args) -> dict:
     return {
         "serial": {"port": args.port, "baud": args.baud},
@@ -302,6 +478,10 @@ def resolved_config_dict(args) -> dict:
             "runout_gpio": args.runout_gpio,
             "runout_active_high": args.runout_active_high,
             "runout_debounce": args.runout_debounce,
+            "rearm_button_gpio": args.rearm_button_gpio,
+            "rearm_button_debounce": args.rearm_button_debounce,
+            "rearm_button_long_press": args.rearm_button_long_press,
+            "rearm_button_active_high": getattr(args, "rearm_button_active_high", False),
         },
         "detection": {
             "arm_min_pulses": args.arm_min_pulses,
@@ -330,11 +510,28 @@ def resolved_config_dict(args) -> dict:
     }
 
 
+class _NoControlSocketAction(argparse.Action):
+    """--no-control-socket: set the boolean dest AND clear control_socket.
+
+    Setting both keeps direct build_arg_parser() consumers working (the flag
+    immediately disables the socket) while the boolean dest lets parse_config()
+    re-apply the disable after the TOML merge.
+    """
+
+    def __init__(self, option_strings, dest, **kwargs):
+        kwargs.setdefault("default", False)
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, True)
+        namespace.control_socket = ""
+
+
 def build_arg_parser(defaults=None):
     """Construct the CLI argument parser for the daemon."""
     ap = argparse.ArgumentParser(epilog=USAGE_EXAMPLES, formatter_class=RawDescriptionHelpFormatter)
-    # Defaults are sourced from the built-in defaults, and optionally overridden by TOML config
-    # (we backfill unset CLI args after parsing).
+    # Defaults are the built-in defaults, optionally overlaid with TOML values by the
+    # two-pass parse in cli.parse_config() — so explicit CLI flags always win.
     if defaults is None:
         defaults = config_defaults_from({})
     ap.set_defaults(**defaults)
@@ -362,10 +559,30 @@ def build_arg_parser(defaults=None):
     ap.add_argument("--no-banner", dest="no_banner", action="store_true", help="Disable the startup banner.")
     ap.add_argument("--banner", dest="no_banner", action="store_false", help="Enable the startup banner.")
     ap.add_argument("--runout-active-high", action="store_true", help="Treat the runout signal as active-high.")
-    ap.add_argument("--doctor", action="store_true", help="Run host/printer diagnostics (GPIO + serial checks) and exit.")
-    ap.add_argument("--self-test", action="store_true", help="Dry-run mode: monitor inputs and parsing but do not send pause commands.")
+    ap.add_argument("--runout-active-low", dest="runout_active_high", action="store_false",
+                    help="Treat the runout signal as active-low (default; overrides a config file that sets active-high).")
+    ap.add_argument("--doctor", action="store_true",
+                    help="Run diagnostics and exit: GPIO pulse/runout/button checks, plus an M118 serial echo check when -p/--port is given (non-fatal).")
+    ap.add_argument("--self-test", action="store_true",
+                    help="Safe hardware check: serial M118 echo round-trip plus motion pulse/runout observation; the monitor is not started and no pause G-code is sent.")
     ap.add_argument("--pause-gcode", help="G-code to send when a jam/runout is detected.")
     ap.add_argument("--jam-timeout", type=float, help="Seconds without motion pulses (after arming) before declaring a jam.")
+    ap.add_argument("--jam-timeout-adaptive", dest="jam_timeout_adaptive", action="store_true",
+                    help="Scale the jam timeout with the recent pulse rate (k / max(pps_ema, pps_floor), clamped to [min, max]).")
+    ap.add_argument("--no-jam-timeout-adaptive", dest="jam_timeout_adaptive", action="store_false",
+                    help="Use the static --jam-timeout value.")
+    ap.add_argument("--jam-timeout-min", type=float, help="Lower clamp (seconds) for the adaptive jam timeout.")
+    ap.add_argument("--jam-timeout-max", type=float, help="Upper clamp (seconds) for the adaptive jam timeout.")
+    ap.add_argument("--jam-timeout-k", type=float,
+                    help="Adaptive timeout gain: effective timeout = k / max(pps_ema, pps_floor).")
+    ap.add_argument("--jam-timeout-pps-floor", type=float,
+                    help="Floor (pulses/sec) applied to the pps EMA in the adaptive timeout calculation.")
+    ap.add_argument("--jam-timeout-ema-halflife", type=float,
+                    help="Half-life (seconds) of the pulses-per-second EMA used by the adaptive timeout.")
+    ap.add_argument("--arm-grace-pulses", type=int,
+                    help="Suppress jam latching after arming until this many pulses are seen (0 disables).")
+    ap.add_argument("--arm-grace-s", type=float,
+                    help="Suppress jam latching for this many seconds after arming (0 disables). Releases together with --arm-grace-pulses on whichever comes first.")
     ap.add_argument("--arm-min-pulses", type=int, help="(Legacy/unused) Jam detection is marker-driven via filmon:arm.")
     ap.add_argument("--breadcrumb-interval", type=float,
                     help="Emit a low-volume heartbeat log every N seconds while enabled. Set 0 to disable.")
@@ -375,7 +592,12 @@ def build_arg_parser(defaults=None):
     sock_group = ap.add_mutually_exclusive_group()
     sock_group.add_argument("--control-socket", dest="control_socket",
                             help="Path to a local UNIX control socket (e.g. /run/filmon.sock). Use to rearm without sharing the printer serial port.")
-    sock_group.add_argument("--no-control-socket", dest="control_socket", action="store_const", const="",
+    # Distinct boolean dest so an explicit CLI disable survives the TOML merge
+    # (a const="" on control_socket would be clobbered by a configured socket path).
+    # The action also clears control_socket directly so consumers that call
+    # build_arg_parser()/parse_args() without parse_config() keep the old
+    # "flag disables the socket" behavior.
+    sock_group.add_argument("--no-control-socket", dest="no_control_socket", action=_NoControlSocketAction,
                             help="Disable the local control socket.")
     ap.add_argument("--config", help="Path to a TOML config file. CLI args override config values.")
     ap.add_argument("--print-config", action="store_true", help="Print the resolved configuration and exit.")
