@@ -38,6 +38,8 @@ class MonitorState:
     mode: MonitorMode = MonitorMode.DISABLED
     latched: bool = False
     pause_sent_ts: float = 0.0
+    pause_delivered: bool = False  # last pause G-code attempt reached the port
+
     last_trigger: str = ""
     last_trigger_ts: float = 0.0
 

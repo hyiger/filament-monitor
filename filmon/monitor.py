@@ -9,6 +9,11 @@ import math
 import time
 from typing import Optional
 
+try:
+    import serial  # pyserial (only used for exception types in _send_gcode)
+except ImportError:  # pragma: no cover
+    serial = None
+
 
 from dataclasses import asdict
 from .gpio import DigitalInputDevice
@@ -26,6 +31,17 @@ import os
 # register as a short press.
 REARM_RELEASE_BOUNCE_S = 0.05
 
+# Seconds between retries of an undelivered pause while latched.
+PAUSE_RETRY_INTERVAL_S = 5.0
+
+# Exceptions that mean a serial write failed (wedged/closed port, write
+# timeout, or no port attached at all).
+if serial is not None:
+    _SERIAL_WRITE_ERRORS = (serial.SerialException, OSError, AttributeError)
+else:  # pragma: no cover
+    _SERIAL_WRITE_ERRORS = (OSError, AttributeError)
+
+
 class FilamentMonitor:
     """Filament motion/runout monitor controller.
 
@@ -33,9 +49,12 @@ class FilamentMonitor:
     jam/runout decision logic. When a fault is detected while armed, it sends a
     pause command (default: M600) over serial and latches until reset or rearm."""
 
-    # Class-level fallback so minimal instances built via __new__ in tests
-    # keep working; __init__ replaces it with a per-instance lock.
+    # Class-level fallbacks so minimal instances built via __new__ in tests
+    # keep working; __init__ replaces these with per-instance values.
     _state_lock = threading.RLock()
+    _pause_delivered = False
+    _pause_last_attempt_ts = 0.0
+    _pause_retry_interval_s = PAUSE_RETRY_INTERVAL_S
 
     def __init__(
         self,
@@ -162,14 +181,20 @@ class FilamentMonitor:
         self._ser = None
         self._ser_lock = threading.Lock()
         # Serializes state transitions across the main loop, runout/button
-        # callbacks, and the control socket thread, so an operator reset can
-        # never race a fault check into pausing a just-disabled monitor.
-        # RLock: _maybe_jam and the arm handlers call _trigger_pause while
-        # holding it.
+        # callbacks, and the control socket thread. RLock because _maybe_jam
+        # calls _trigger_pause while holding it. Motion-pulse callbacks stay
+        # lock-free by design (append-only deque + independent counters).
         self._state_lock = threading.RLock()
         self._stop_evt = threading.Event()
         self._serial_q = queue.Queue()
         self._serial_thread = None
+        self._loop_thread = None
+
+        # Pause delivery tracking: latch first, then send; if the send fails
+        # the main loop retries until it lands (unlimited — safety daemon).
+        self._pause_delivered = False
+        self._pause_last_attempt_ts = 0.0
+        self._pause_retry_interval_s = PAUSE_RETRY_INTERVAL_S
 
         # Optional local control socket (lets you re-arm without sharing the printer serial port)
         self._control_thread = None
@@ -237,9 +262,10 @@ class FilamentMonitor:
             return
 
         ts = now_s()
-        # Track recent pulses for pps breadcrumbs.
+        # Track recent pulses for pps breadcrumbs. Append-only here: pruning
+        # happens on the main loop (via _pps), so this callback never races a
+        # concurrent prune/clear on the deque.
         self._pulse_times.append(ts)
-        self._prune_pulses(ts)
 
         self.state.motion_pulses_total += 1
         self.state.motion_pulses_since_reset += 1
@@ -261,8 +287,13 @@ class FilamentMonitor:
             self._pulse_times.clear()
             return
         cutoff = now - self._pulse_window_s
-        while self._pulse_times and self._pulse_times[0] < cutoff:
-            self._pulse_times.popleft()
+        try:
+            while self._pulse_times and self._pulse_times[0] < cutoff:
+                self._pulse_times.popleft()
+        except IndexError:
+            # A concurrent clear() (reset/rearm from another thread) emptied
+            # the deque mid-prune; nothing left to drop.
+            pass
 
     def _pps(self, now: float) -> float:
         """Return pulses-per-second over the recent window."""
@@ -311,11 +342,14 @@ class FilamentMonitor:
 
     def _reset_pulse_tracking(self):
         """Reset pulse-rate tracking and stall breadcrumb state."""
-        self._pulse_times.clear()
-        self._pps_ema = 0.0
-        self._pps_ema_last_ts = 0.0
-        self._stall_next_idx = 0
-        self._next_hb_ts = now_s() + self._breadcrumb_interval_s
+        # The motion callback appends to the deque lock-free; the clear() is
+        # serialized under the state lock (callers already hold it — RLock).
+        with self._state_lock:
+            self._pulse_times.clear()
+            self._pps_ema = 0.0
+            self._pps_ema_last_ts = 0.0
+            self._stall_next_idx = 0
+            self._next_hb_ts = now_s() + self._breadcrumb_interval_s
 
     def _maybe_breadcrumbs(self):
         """Emit low-volume 'heartbeat' and 'stall' breadcrumbs for debugging/tuning."""
@@ -370,6 +404,9 @@ class FilamentMonitor:
 
     def _on_runout_asserted(self):
         """GPIO callback when the runout switch asserts (filament not present)."""
+        # Ignore late GPIO callbacks once shutdown begins.
+        if self._stop_evt.is_set():
+            return
         if not self._debounced():
             return
         # Always track the debounced runout state, but only log/act once armed.
@@ -382,6 +419,9 @@ class FilamentMonitor:
 
     def _on_runout_cleared(self):
         """GPIO callback when the runout switch clears (filament present)."""
+        # Ignore late GPIO callbacks once shutdown begins.
+        if self._stop_evt.is_set():
+            return
         if not self._debounced():
             return
         # Always track the debounced runout state, but only log once armed.
@@ -439,12 +479,32 @@ class FilamentMonitor:
                 self.logger.emit("runout_cleared")
 
     def attach_serial(self, ser):
-        """Attach an already-open serial port to the monitor."""
-        self._ser = ser
+        """Attach an already-open serial port to the monitor.
 
-    def start_serial_reader(self, verbose: bool = False):
-        """Start the background serial reader thread if a serial port is attached."""
-        t = SerialThread(self._ser, self._serial_q, self._stop_evt, self.logger, verbose=verbose)
+        Also used by the serial reader to swap in a reopened port after a
+        reconnect, so the swap takes the write lock."""
+        with self._ser_lock:
+            self._ser = ser
+
+    def start_serial_reader(self, verbose: bool = False, port: str = "", baud: int = 0):
+        """Start the background serial reader thread if a serial port is attached.
+
+        Args:
+            port: Device path used to reopen the port after a read error.
+                  Defaults to state.serial_port.
+            baud: Baud rate for the reopen. Defaults to state.baud.
+        """
+        t = SerialThread(
+            self._ser,
+            self._serial_q,
+            self._stop_evt,
+            self.logger,
+            verbose=verbose,
+            port=port or self.state.serial_port,
+            baud=baud or self.state.baud,
+            state=self.state,
+            on_reconnect=self.attach_serial,
+        )
         t.start()
         self._serial_thread = t
 
@@ -585,11 +645,12 @@ class FilamentMonitor:
         Intended to be used after the operator clears a jam and is about to resume
         the print. This does not require a second serial connection.
         """
+        # Refresh counters and timestamps first, then flip the enabling flags
+        # last: a concurrent _maybe_jam must never observe ARMED/unlatched
+        # with stale timing (defense in depth on top of the state lock).
+        # Note: runout_asserted is intentionally preserved so a still-standing
+        # runout re-pauses below instead of being silently forgotten.
         with self._state_lock:
-            # Clear latch and counters, then arm with a fresh timeout reference.
-            # Note: runout_asserted is intentionally preserved so a still-standing
-            # runout re-pauses below instead of being silently forgotten.
-            self.state.latched = False
             self.state.motion_pulses_since_reset = 0
             self.state.motion_pulses_since_arm = 0
             now = now_s()
@@ -597,6 +658,7 @@ class FilamentMonitor:
             self.state.last_pulse_ts = now
             self._reset_pulse_tracking()
             self._stall_next_idx = 0
+            self.state.latched = False
             self.state.mode = MonitorMode.ARMED
             self.logger.emit("rearmed")
             # A runout still asserted after the operator intervention must pause again.
@@ -605,14 +667,37 @@ class FilamentMonitor:
                 self.logger.emit("runout_asserted")
                 self._trigger_pause("runout")
 
-    def _send_gcode(self, gcode):
-        """Send a single G-code line over serial (adds newline and flushes)."""
-        # Serial can be written from the main loop and GPIO callbacks.
-        # Keep writes atomic to avoid interleaving lines.
-        with self._ser_lock:
-            self._ser.write((gcode + "\n").encode())
-            self._ser.flush()
+    def _send_gcode(self, gcode) -> bool:
+        """Send a single G-code line over serial (adds newline and flushes).
+
+        Returns True when the write reached the port, False when it failed
+        (wedged/closed port, write timeout, or no port attached). Failures are
+        logged as 'gcode_send_failed' instead of raising so callers can retry.
+        """
+        try:
+            # Serial can be written from the main loop and GPIO callbacks.
+            # Keep writes atomic to avoid interleaving lines.
+            with self._ser_lock:
+                self._ser.write((gcode + "\n").encode())
+                self._ser.flush()
+        except _SERIAL_WRITE_ERRORS as e:
+            self.logger.emit("gcode_send_failed", gcode=gcode, error=str(e))
+            return False
         self.logger.emit("gcode_sent", gcode=gcode)
+        return True
+
+    def _send_pause_gcode(self) -> bool:
+        """Send the pause sequence (M400 drain, then pause G-code).
+
+        Returns True only when both lines were delivered. Both are always
+        attempted so a recovered port gets the full sequence."""
+        drained = self._send_gcode("M400")  # ensure the planner is drained before pausing
+        paused = self._send_gcode(self.pause_gcode)
+        delivered = bool(drained and paused)
+        self._pause_delivered = delivered
+        self.state.pause_delivered = delivered
+        self._pause_last_attempt_ts = now_s()
+        return delivered
 
     def _trigger_pause(self, reason):
         """Latch and send the pause command due to a detected fault.
@@ -620,53 +705,61 @@ class FilamentMonitor:
         Args:
             reason: Short string describing the fault (e.g. 'jam', 'runout').
         """
-        # Serialized with every state transition: the socket/button threads
-        # cannot reset/disable between the checks below and the latch+send.
         with self._state_lock:
-            self._trigger_pause_locked(reason)
-
-    def _trigger_pause_locked(self, reason):
-        """Body of _trigger_pause; caller holds _state_lock."""
-        # Idempotency: if already latched, do nothing (prevents duplicate pause/notify).
-        if self.state.latched:
-            return
-        # A pause only ever makes sense while ARMED. Every caller checks this,
-        # but a concurrent reset/disable from the socket or button thread can
-        # land between that check and here — refuse rather than pause a
-        # monitor the operator just disabled.
-        if self.state.mode != MonitorMode.ARMED:
-            return
-        self.state.latched = True
-        now = now_s()
-        self.state.pause_sent_ts = now
-        self.state.last_trigger = reason
-        self.state.last_trigger_ts = now
-        dt = (now - self.state.last_pulse_ts) if self.state.last_pulse_ts else None
-        self.logger.emit(
-            "pause_triggered",
-            reason=reason,
-            dt_since_pulse=(round(dt, 3) if dt is not None else None),
-            pps=round(self._pps(now), 3),
-            pulses_reset=self.state.motion_pulses_since_reset,
-            pulses_arm=self.state.motion_pulses_since_arm,
-        )
-        # Ensure the planner is drained before pausing.
-        self._send_gcode("M400")
-        self._send_gcode(self.pause_gcode)
-
-        # Notify (best-effort).
-        if reason == "jam":
-            self.notifier.send(
-                title="Filament Monitor",
-                message="🚨 Filament jam detected — print paused (M600)",
-                priority=1,
+            # Idempotency: if already latched, do nothing (prevents duplicate pause/notify).
+            if self.state.latched:
+                return
+            # A pause only ever makes sense while ARMED. Every caller checks
+            # this, but a concurrent reset/disable can land between that check
+            # and here — refuse rather than pause a monitor the operator just
+            # disabled.
+            if self.state.mode != MonitorMode.ARMED:
+                return
+            # Latch first: even if the send below fails, the fault stays
+            # recorded and the main loop keeps retrying delivery.
+            self.state.latched = True
+            now = now_s()
+            self.state.pause_sent_ts = now
+            self.state.last_trigger = reason
+            self.state.last_trigger_ts = now
+            dt = (now - self.state.last_pulse_ts) if self.state.last_pulse_ts else None
+            self.logger.emit(
+                "pause_triggered",
+                reason=reason,
+                dt_since_pulse=(round(dt, 3) if dt is not None else None),
+                pps=round(self._pps(now), 3),
+                pulses_reset=self.state.motion_pulses_since_reset,
+                pulses_arm=self.state.motion_pulses_since_arm,
             )
-        elif reason == "runout":
-            self.notifier.send(
-                title="Filament Monitor",
-                message="📭 Filament runout detected — print paused",
-                priority=1,
-            )
+            delivered = self._send_pause_gcode()
+            if not delivered:
+                self.logger.emit("pause_gcode_failed", reason=reason)
+
+            # Notify (best-effort). Always attempted, even when the serial send
+            # failed — the operator must hear about an undelivered pause.
+            if reason == "runout":
+                message = "📭 Filament runout detected — print paused"
+            else:
+                message = "🚨 Filament jam detected — print paused (M600)"
+            if not delivered:
+                message += " (pause G-code send FAILED)"
+            self.notifier.send(title="Filament Monitor", message=message, priority=1)
+
+    def _maybe_pause_retry(self):
+        """Retry an undelivered pause while latched.
+
+        Called by the main loop each pass. The pause G-code is this daemon's
+        whole point, so retries are unlimited: one attempt every
+        _pause_retry_interval_s until the write lands (e.g. after a serial
+        reconnect) or the operator resets/rearms."""
+        with self._state_lock:
+            if not self.state.latched or self._pause_delivered:
+                return
+            now = now_s()
+            if now - self._pause_last_attempt_ts < self._pause_retry_interval_s:
+                return
+            self.logger.emit("pause_retry", reason=self.state.last_trigger)
+            self._send_pause_gcode()
 
     def _maybe_jam(self):
         """Evaluate jam condition based on pulse timing and thresholds.
@@ -675,21 +768,23 @@ class FilamentMonitor:
 
         The jam timeout may be adaptive (pps-based) when enabled. Additionally, an optional post-(re)arm grace
         period can be configured to reduce false positives during sparse extrusion (e.g., tiny endgame layers)."""
-        if self.state.mode != MonitorMode.ARMED or self.state.latched:
-            return
-
-        now = now_s()
-
-        # Optional post-(re)arm grace gate: do not allow jam latch until the grace criteria are met.
-        if (self.arm_grace_pulses > 0 or self.arm_grace_s > 0.0) and self.state.arm_ts:
-            pulses_ok = self.state.motion_pulses_since_arm >= self.arm_grace_pulses if self.arm_grace_pulses > 0 else True
-            time_ok = (now - self.state.arm_ts) >= self.arm_grace_s if self.arm_grace_s > 0.0 else True
-            if not (pulses_ok or time_ok):
+        with self._state_lock:
+            if self.state.mode != MonitorMode.ARMED or self.state.latched:
                 return
 
-        timeout_s = self._effective_jam_timeout_s(now)
-        if now - self.state.last_pulse_ts >= timeout_s:
-            self._trigger_pause("jam")
+            now = now_s()
+
+            # Optional post-(re)arm grace gate: do not allow jam latch until the grace criteria are met.
+            if (self.arm_grace_pulses > 0 or self.arm_grace_s > 0.0) and self.state.arm_ts:
+                pulses_ok = self.state.motion_pulses_since_arm >= self.arm_grace_pulses if self.arm_grace_pulses > 0 else True
+                time_ok = (now - self.state.arm_ts) >= self.arm_grace_s if self.arm_grace_s > 0.0 else True
+                if not (pulses_ok or time_ok):
+                    return
+
+            timeout_s = self._effective_jam_timeout_s(now)
+            if now - self.state.last_pulse_ts >= timeout_s:
+                self._trigger_pause("jam")
+
     def _handle_control_marker(self, line):
         """Handle a decoded control marker (serialized under _state_lock).
 
@@ -737,11 +832,15 @@ class FilamentMonitor:
 
             if CONTROL_ARM in low:
                 # Start timeout reference at arm time to avoid an immediate jam.
-                self.state.mode = MonitorMode.ARMED
+                # Timestamps/counters are written before the mode flip so a
+                # concurrent _maybe_jam never sees ARMED with stale timing
+                # (defense in depth on top of the state lock).
+                now = now_s()
                 self.state.motion_pulses_since_arm = 0
-                self.state.arm_ts = now_s()
-                self.state.last_pulse_ts = self.state.arm_ts
+                self.state.arm_ts = now
+                self.state.last_pulse_ts = now
                 self._stall_next_idx = 0
+                self.state.mode = MonitorMode.ARMED
                 self.logger.emit("armed")
                 # A runout that occurred while unarmed must still pause once armed.
                 if self._runout_asserted_now():
@@ -755,33 +854,52 @@ class FilamentMonitor:
                 if self.state.mode == MonitorMode.ENABLED:
                     self.logger.emit("enabled")
                     return
-                self.state.mode = MonitorMode.ENABLED
                 self.state.last_pulse_ts = now_s()
                 self._stall_next_idx = 0
+                self.state.mode = MonitorMode.ENABLED
                 self.logger.emit("enabled")
                 return
 
     def start(self):
         """Start GPIO monitoring and the main loop (and serial reader if configured)."""
-        threading.Thread(target=self._loop, daemon=True).start()
+        t = threading.Thread(target=self._loop, daemon=True)
+        t.start()
+        self._loop_thread = t
 
     def stop(self):
         """Stop threads and clean up GPIO/serial resources."""
         self._stop_evt.set()
         self._control_stop_evt.set()
 
+    def _loop_once(self):
+        """One pass of the main loop: drain a serial line, then run periodic checks."""
+        try:
+            line = self._serial_q.get(timeout=0.2)
+            if self.verbose:
+                self.logger.emit("serial", line=line)
+            self._handle_control_marker(line)
+        except queue.Empty:
+            pass
+        self._reconcile_runout()
+        self._maybe_jam()
+        self._maybe_pause_retry()
+        self._maybe_breadcrumbs()
+
     def _loop(self):
-        """Main periodic loop. Processes control markers and checks for jam/runout faults."""
+        """Main periodic loop. Processes control markers and checks for jam/runout faults.
+
+        Any unexpected exception is fatal by design: emit 'monitor_loop_error',
+        set the stop event so the supervisor exits non-zero, and let systemd
+        restart a daemon whose core loop can no longer be trusted."""
         while not self._stop_evt.is_set():
             try:
-                line = self._serial_q.get(timeout=0.2)
-                if self.verbose:
-                    self.logger.emit("serial", line=line)
-                self._handle_control_marker(line)
-            except queue.Empty:
-                pass
-            self._reconcile_runout()
-            self._maybe_jam()
-            self._maybe_breadcrumbs()
+                self._loop_once()
+            except Exception as e:
+                try:
+                    self.logger.emit("monitor_loop_error", error=str(e))
+                except Exception:
+                    pass
+                self._stop_evt.set()
+                break
 
 

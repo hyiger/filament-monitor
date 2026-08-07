@@ -126,7 +126,10 @@ def main():
     if not args.port:
         raise SystemExit("Normal mode requires -p/--port")
 
-    ser = serial.Serial(args.port, args.baud, timeout=0.25)
+    # write_timeout bounds _send_gcode when the printer stops draining its CDC
+    # buffer (kill screen, mid-flash): the write raises SerialTimeoutException
+    # instead of blocking forever while holding the serial lock.
+    ser = serial.Serial(args.port, args.baud, timeout=0.25, write_timeout=2.0)
     state = MonitorState(serial_connected=True, serial_port=args.port, baud=args.baud)
     logger = JsonLogger(enable_json=bool(getattr(args, "json", False)))
     mon = FilamentMonitor(
@@ -185,7 +188,7 @@ def main():
         )
 
     mon.attach_serial(ser)
-    mon.start_serial_reader(verbose=args.verbose)
+    mon.start_serial_reader(verbose=args.verbose, port=args.port, baud=args.baud)
     # Local control socket (for re-arming/resetting without a second serial connection)
     if getattr(args, "control_socket", None):
         mon.start_control_socket(args.control_socket)
@@ -199,19 +202,39 @@ def main():
     while not stop.is_set():
         t = getattr(mon, "_serial_thread", None)
         if t is not None and not t.is_alive():
+            # The reader reconnects on its own (a reconnecting thread is still
+            # alive), so a dead thread means it truly crashed unexpectedly.
             logger.emit("serial_thread_dead")
             exit_code = 3
+            stop.set()
+            break
+        lt = getattr(mon, "_loop_thread", None)
+        if lt is not None and not lt.is_alive():
+            # The main loop is the jam detector; without it the daemon only
+            # looks healthy. Exit non-zero so systemd restarts us.
+            logger.emit("monitor_loop_dead")
+            exit_code = 4
             stop.set()
             break
         time.sleep(0.2)
 
     mon.stop()
-    if getattr(mon, "_serial_thread", None) is not None:
+    # Join worker threads before closing the port: closing mid-write is
+    # unsupported by pyserial and can truncate a final pause command.
+    for name in ("_serial_thread", "_loop_thread", "_control_thread"):
+        t = getattr(mon, name, None)
+        if t is not None:
+            try:
+                t.join(timeout=1.0)
+            except Exception:
+                pass
+    # Close whichever port is currently attached (a reconnect may have swapped
+    # in a fresh one); hold the write lock so we never close mid-write.
+    with mon._ser_lock:
         try:
-            mon._serial_thread.join(timeout=1.0)
+            (mon._ser or ser).close()
         except Exception:
             pass
-    ser.close()
     return exit_code
 
 
