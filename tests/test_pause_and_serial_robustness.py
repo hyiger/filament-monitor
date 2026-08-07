@@ -356,3 +356,31 @@ def test_pulse_deque_bounded_while_disabled(monkeypatch):
     # One loop pass while still DISABLED prunes to the pps window (2 s => ~20).
     mon._loop_once()
     assert len(mon._pulse_times) <= 25
+
+
+def test_send_gcode_refuses_while_disconnected(monkeypatch):
+    """A write racing the reconnect can be buffered by the dying port object
+    and discarded on close while being reported delivered. The reader clears
+    serial_connected before closing, so _send_gcode must refuse while it is
+    False and let the retry path resend after reconnect (Codex round-4 P1)."""
+    m, mon, logger, notifier = _make_monitor(monkeypatch, jam_timeout_s=1.0)
+    t = {"now": 8000.0}
+    monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
+
+    # Reader has flagged the disconnect; the stale port object still "works".
+    mon.state.serial_connected = False
+    mon._handle_control_marker("filmon:arm")
+    t["now"] += 2.0
+    mon._maybe_jam()
+
+    assert mon.state.latched is True
+    assert mon.state.pause_delivered is False
+    assert mon._ser.writes == []  # nothing handed to the dying port
+    assert "gcode_send_failed" in logger.names()
+
+    # Reconnect completes: flag restored, retry delivers the full sequence.
+    mon.state.serial_connected = True
+    t["now"] += 10.0
+    mon._maybe_pause_retry()
+    assert mon.state.pause_delivered is True
+    assert any("M600" in w for w in mon._ser.writes)

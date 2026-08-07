@@ -474,13 +474,13 @@ class FilamentMonitor:
         is_active = getattr(self.runout, "is_active", None)
         if is_active is None:
             return
-        now = now_s()
-        if self.runout_debounce_s and (now - self._last_runout_edge_seen) < self.runout_debounce_s:
-            return
-        # Sample and decide under the state lock: an edge callback or an
-        # operator reset must not interleave between the level read and the
-        # state update/pause.
+        # Check quiet period, sample, and decide under the state lock: an edge
+        # arriving between an outside-the-lock quiet check and the sample
+        # would let a still-chattering pin bypass the debounce.
         with self._state_lock:
+            now = now_s()
+            if self.runout_debounce_s and (now - self._last_runout_edge_seen) < self.runout_debounce_s:
+                return
             level = bool(self.runout.is_active)
             if level == self.state.runout_asserted:
                 return
@@ -498,9 +498,12 @@ class FilamentMonitor:
         """Attach an already-open serial port to the monitor.
 
         Also used by the serial reader to swap in a reopened port after a
-        reconnect, so the swap takes the write lock."""
+        reconnect, so the swap takes the write lock. Attaching an open port
+        means connected: _send_gcode refuses writes while the reader has
+        flagged a disconnect."""
         with self._ser_lock:
             self._ser = ser
+            self.state.serial_connected = True
 
     def start_serial_reader(self, verbose: bool = False, port: str = "", baud: int = 0):
         """Start the background serial reader thread if a serial port is attached.
@@ -631,8 +634,10 @@ class FilamentMonitor:
                     if not chunk:
                         break
                     data += chunk
-                # Only the first line is the command; ignore any pipelined extras.
-                cmd = data.split(b"\n", 1)[0].decode("utf-8", errors="replace").strip()
+                # Only the first line is the command; ignore any pipelined
+                # extras. Normalize case here: _handle_control_command accepts
+                # mixed case, so the dispatch decision below must too.
+                cmd = data.split(b"\n", 1)[0].decode("utf-8", errors="replace").strip().lower()
                 if cmd == "test-notify":
                     # Blocks until the HTTP outcome is known (seconds). Hand
                     # the connection to a short-lived thread so reset/rearm
@@ -794,6 +799,13 @@ class FilamentMonitor:
             # case the pause-retry path exists for. The OS transmits the
             # buffered bytes asynchronously.
             with self._ser_lock:
+                # The reader clears serial_connected BEFORE taking this lock to
+                # close a dead port. A write that races in first could be
+                # buffered by the dying object and discarded on close while
+                # being reported as delivered — refuse instead; the pause
+                # retry path resends once the port is back.
+                if not self.state.serial_connected:
+                    raise OSError("serial disconnected (reconnect in progress)")
                 self._ser.write((gcode + "\n").encode())
         except _SERIAL_WRITE_ERRORS as e:
             self.logger.emit("gcode_send_failed", gcode=gcode, error=str(e))
