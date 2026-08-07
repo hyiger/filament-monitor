@@ -244,7 +244,7 @@ The table below is synced to the script’s `argparse` help strings.
 | `--runout-enabled` | Enable runout monitoring (default: disabled). | `False` |
 | `--runout-gpio` | BCM GPIO pin number for the optional runout input. | `27` |
 | `--runout-debounce` | Debounce time (seconds) applied to the runout input to ignore short glitches. | `` |
-| `--runout-active-high` | Treat the runout signal as active-high (default is active-low). | `False` |
+| `--runout-active-high` / `--runout-active-low` | Runout signal polarity (default active-low); the explicit low flag lets the CLI override a config file that sets active-high. | `False` |
 
 ### Jam detection tuning
 

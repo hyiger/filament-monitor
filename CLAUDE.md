@@ -215,7 +215,7 @@ socket = "/run/filmon/filmon.sock"
 
 Config precedence is **CLI > TOML > built-in default**, implemented as a two-pass parse: a first pass reads only `--config`, the TOML values are installed as parser defaults, and the full second pass lets explicitly-passed CLI flags win.
 
-Detection tuning has CLI flags mirroring the TOML keys: `--jam-timeout-adaptive` / `--no-jam-timeout-adaptive`, `--jam-timeout-min`, `--jam-timeout-max`, `--jam-timeout-k`, `--jam-timeout-pps-floor`, `--jam-timeout-ema-halflife`, `--arm-grace-pulses`, `--arm-grace-s`.
+Detection tuning has CLI flags mirroring the TOML keys: `--jam-timeout-adaptive` / `--no-jam-timeout-adaptive`, `--jam-timeout-min`, `--jam-timeout-max`, `--jam-timeout-k`, `--jam-timeout-pps-floor`, `--jam-timeout-ema-halflife`, `--arm-grace-pulses`, `--arm-grace-s`. Runout polarity has a symmetric pair: `--runout-active-high` / `--runout-active-low` (so the CLI can override a TOML `runout_active_high = true`). Startup validation rejects non-finite numbers (`nan`/`inf`), fractional values for integer fields, quoted TOML booleans, non-positive jam/adaptive timeouts, and `jam_timeout_min > jam_timeout_max`.
 
 `rearm_button_active_high` has no CLI flag — config-only.
 
@@ -243,7 +243,7 @@ Detection tuning has CLI flags mirroring the TOML keys: `--jam-timeout-adaptive`
 ./filmonctl.py --socket /path/to/sock status   # Custom socket path
 ```
 
-`test-notify` goes through the daemon socket so it exercises the daemon's own credentials (the ones in the systemd unit); `test-notify-local` sends directly from the client shell and needs `PUSHOVER_TOKEN` / `PUSHOVER_USER` in the local environment.
+`test-notify` goes through the daemon socket and blocks until the HTTP outcome is known, so `ok` means Pushover actually accepted the message (failures return an error and log `notify_failed`); `test-notify-local` sends directly from the client shell and needs `PUSHOVER_TOKEN` / `PUSHOVER_USER` in the local environment.
 
 ---
 
