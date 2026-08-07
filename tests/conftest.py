@@ -47,6 +47,34 @@ class DummyGPIO:
     DigitalInputDevice = DummyDigitalInputDevice
 
 
+class CapturingLogger:
+    """Minimal logger that matches the monitor's .emit(event, **fields) contract.
+
+    Records (event, fields) tuples so tests can assert on emitted events.
+    """
+
+    def __init__(self):
+        self.events = []
+
+    def emit(self, event: str, **fields):
+        self.events.append((event, fields))
+
+
+class DummySerial:
+    """Serial stub capturing bytes written by the monitor (decoded for assertions)."""
+
+    def __init__(self):
+        self.writes = []
+
+    def write(self, data: bytes):
+        self.writes.append(data.decode(errors="replace"))
+
+    def flush(self):
+        pass
+
+
 # Expose helpers for tests without explicit imports.
 builtins.DummyGPIO = DummyGPIO
 builtins.DummyDigitalInputDevice = DummyDigitalInputDevice
+builtins.CapturingLogger = CapturingLogger
+builtins.DummySerial = DummySerial

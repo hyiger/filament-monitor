@@ -1,18 +1,12 @@
 import json
+import shutil
 import socket
 import tempfile
 import time
 import pytest
 
-from builtins import DummyGPIO
+from builtins import CapturingLogger, DummyGPIO, DummySerial
 from filmon.state import MonitorMode
-
-
-class CapturingLogger:
-    def __init__(self):
-        self.events = []
-    def emit(self, event: str, **fields):
-        self.events.append((event, fields))
 
 
 class DummyDigitalInputDevice:
@@ -23,15 +17,6 @@ class DummyDigitalInputDevice:
         self.kwargs = kwargs
         self.when_activated = None
         self.when_deactivated = None
-
-
-class DummySerial:
-    def __init__(self):
-        self.writes = []
-    def write(self, data: bytes):
-        self.writes.append(data.decode(errors="replace"))
-    def flush(self):
-        pass
 
 
 def _make_monitor(monkeypatch, *, rearm_button_gpio=None):
@@ -89,25 +74,29 @@ def test_control_socket_rearm_clears_latch_and_arms(monkeypatch):
     mon.state.motion_pulses_since_arm = 45
 
     # Use /tmp directly to avoid macOS's 104-byte AF_UNIX path length limit.
+    # (pytest's tmp_path can exceed it on macOS, so clean up manually instead.)
     tmpdir = tempfile.mkdtemp(dir="/tmp")
-    sock_path = tmpdir + "/filmon.sock"
-    mon.start_control_socket(sock_path)
+    try:
+        sock_path = tmpdir + "/filmon.sock"
+        mon.start_control_socket(sock_path)
 
-    # Wait briefly for server thread to bind.
-    import os
-    deadline = time.time() + 2.0
-    while time.time() < deadline and not os.path.exists(sock_path):
-        time.sleep(0.01)
+        # Wait briefly for server thread to bind.
+        import os
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not os.path.exists(sock_path):
+            time.sleep(0.01)
 
-    resp = _send_cmd(sock_path, "rearm")
-    assert resp.get("ok") is True
+        resp = _send_cmd(sock_path, "rearm")
+        assert resp.get("ok") is True
 
-    assert mon.state.latched is False
-    assert mon.state.mode == MonitorMode.ARMED
-    assert mon.state.motion_pulses_since_reset == 0
-    assert mon.state.motion_pulses_since_arm == 0
+        assert mon.state.latched is False
+        assert mon.state.mode == MonitorMode.ARMED
+        assert mon.state.motion_pulses_since_reset == 0
+        assert mon.state.motion_pulses_since_arm == 0
 
-    mon.stop()
+        mon.stop()
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def test_rearm_button_is_active_low_with_pullup(monkeypatch):

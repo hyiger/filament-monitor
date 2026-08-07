@@ -26,14 +26,21 @@ class MonitorState:
     counters used for jam and runout decisions.
 
     mode transitions:
-        DISABLED → ENABLED  (filmon:enable)
+        DISABLED → ENABLED  (filmon:enable / filmon:unarm)
         DISABLED → ARMED    (filmon:arm)
         ENABLED  → ARMED    (filmon:arm)
         ENABLED  → DISABLED (filmon:disable / filmon:reset)
-        ARMED    → ENABLED  (filmon:unarm)
+        ARMED    → ENABLED  (filmon:unarm only)
         ARMED    → DISABLED (filmon:disable / filmon:reset)
         any      → DISABLED (filmon:reset also clears latch)
+
+    Edge cases (intentional):
+        - filmon:enable while ARMED is a logged no-op; it never disarms.
+          Leaving ARMED requires filmon:unarm (or disable/reset).
+        - filmon:unarm from DISABLED enables monitoring (lands in ENABLED).
     latched=True is an overlay on ARMED: jam/runout fired, waiting for operator reset/rearm.
+    rearm (control-socket command or button long-press) is only honored while latched;
+    otherwise the socket returns an error and the button logs rearm_ignored.
     """
     mode: MonitorMode = MonitorMode.DISABLED
     latched: bool = False

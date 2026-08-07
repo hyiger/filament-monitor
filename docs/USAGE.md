@@ -82,9 +82,9 @@ The monitor will **never** declare a jam or runout unless you explicitly arm it.
 Use these markers (sent via `M118 A1 ...`):
 
 - `filmon:reset`  — clears latch/counters and disables monitoring
-- `filmon:enable` — enables monitoring (unarmed; safe during travel/heatup)
+- `filmon:enable` — enables monitoring (unarmed; safe during travel/heatup). While armed it is a logged no-op — it never disarms
 - `filmon:arm`    — enables monitoring and arms jam/runout detection
-- `filmon:unarm`  — keeps enabled but disarms detection
+- `filmon:unarm`  — keeps enabled but disarms detection (sent while disabled, it enables monitoring)
 - `filmon:disable`— disables monitoring
 
 Recommended pattern (production-safe):
@@ -145,6 +145,7 @@ stateDiagram-v2
   [*] --> DISABLED: startup
 
   DISABLED --> ENABLED: filmon enable
+  DISABLED --> ENABLED: filmon unarm
   DISABLED --> ARMED: filmon arm
   ENABLED --> DISABLED: filmon disable
   ARMED --> DISABLED: filmon disable
@@ -161,8 +162,15 @@ stateDiagram-v2
 
 **Notes (matches the implementation):**
 - **`filmon:reset` returns to `DISABLED`** (clears latch/counters and disables monitoring).
+- **`filmon:enable` never disarms.** While `ARMED`, `filmon:enable` is a logged no-op — a stray
+  enable in a per-layer or resume macro cannot silently turn detection off. The only marker that
+  moves `ARMED` back to `ENABLED` is `filmon:unarm` (or `disable`/`reset` to leave entirely).
+- **`filmon:unarm` from `DISABLED` enables monitoring** (it lands in `ENABLED`, not `DISABLED`).
 - **`rearm` clears the latch and returns to `ARMED`**. This can be triggered via the control socket, and (if configured) a **long press** on the rearm button.
+- **`rearm` is only honored while `LATCHED`.** When nothing is latched, the control-socket `rearm`
+  command returns an error and a button long-press logs a `rearm_ignored` event with no state change.
 - While **`LATCHED`**, the only valid transitions are `reset` (→ DISABLED) and `rearm` (→ ARMED). All other markers, including `filmon:disable`, are ignored until the latch is cleared.
+- **Arming while runout is already asserted pauses immediately** (the fault does not wait for a new edge).
 
 ### Control inputs (markers, socket, button)
 
@@ -244,14 +252,23 @@ The table below is synced to the script’s `argparse` help strings.
 |---------|---------|---------|
 | `--arm-min-pulses` | (Legacy/unused) Jam detection is marker-driven via `filmon:arm`. | `12` |
 | `--jam-timeout` | **Base** jam timeout: seconds without motion pulses (after arming) before declaring a jam. | `8.0` |
+| `--jam-timeout-adaptive` / `--no-jam-timeout-adaptive` | Enable/disable the adaptive jam timeout (pps-based). | `False` |
+| `--jam-timeout-min` | Lower clamp for the effective adaptive timeout (seconds). | `6.0` |
+| `--jam-timeout-max` | Upper clamp for the effective adaptive timeout (seconds). | `18.0` |
+| `--jam-timeout-k` | Scale factor for the adaptive timeout. | `16.0` |
+| `--jam-timeout-pps-floor` | Minimum pps used in the adaptive formula (prevents divide-by-tiny). | `0.3` |
+| `--jam-timeout-ema-halflife` | EMA half-life (seconds) for smoothing pps. | `3.0` |
+| `--arm-grace-pulses` | Post-(re)arm grace gate: pulses required to release the gate. | unset |
+| `--arm-grace-s` | Post-(re)arm grace gate: seconds required to release the gate. | unset |
 | `--pause-gcode` | G-code to send when a jam/runout is detected. | `M600` |
 
-### Adaptive jam timeout (config-only)
+All of these are also available as `[detection]` keys in the TOML config; precedence is **CLI > TOML > built-in default**.
+
+### Adaptive jam timeout
 
 For prints with very slow or intermittent extrusion (common near end-of-print), a fixed `--jam-timeout` can cause false jams.
-You can enable an **adaptive** jam timeout that scales with the recent pulse rate (pps) and is clamped within bounds.
-
-Add to your config under `[detection]`:
+You can enable an **adaptive** jam timeout that scales with the recent pulse rate (pps) and is clamped within bounds,
+either with the CLI flags above or in the config under `[detection]`:
 
 ```toml
 # Enable adaptive jam timeout (pps-based)
@@ -271,13 +288,20 @@ jam_timeout_ema_halflife = 3.0
 
 The monitor will include `pps_ema` and `jam_timeout_effective_s` in the heartbeat JSON.
 
-### Post-(re)arm grace period (config-only)
+### Post-(re)arm grace period
 
-To prevent an immediate false jam right after `filmon:arm` or a rearm action, you can configure a grace gate.
-Jam latching is suppressed until either condition is met:
+To prevent an immediate false jam right after `filmon:arm` or a rearm action, you can configure a grace gate
+(via `--arm-grace-pulses` / `--arm-grace-s` or the matching `[detection]` keys).
+Jam latching is suppressed until either **configured** condition is met:
 
 - at least `arm_grace_pulses` pulses have been observed since (re)arm, **or**
 - at least `arm_grace_s` seconds have elapsed since (re)arm
+
+whichever comes first. A criterion you leave unset can never release the gate, so configuring only one
+of the two still gates on that one. If you configure **only** `arm_grace_pulses` (no time criterion),
+the gate additionally releases once the effective jam timeout has elapsed since arm — lack of pulses *is*
+the jam condition, so a time-based release always exists and a jam present from the moment of arming is
+still caught.
 
 Example:
 
@@ -332,6 +356,10 @@ latched fault locally (e.g., after an `M600` pause) without needing to send `fil
 **Button actions:**
 - **Short press:** `reset` (same semantics as `filmon:reset`: clears latch/counters and disables monitoring)
 - **Long press:** `rearm` (clears latch and arms detection; equivalent to the control-socket `rearm` command)
+
+`rearm` — from the button or the control socket — is only honored **while a fault is latched**.
+When nothing is latched, a button long-press logs a `rearm_ignored` event with no state change, and the
+control-socket `rearm` command returns an error. Use the marker workflow (`filmon:arm`) for normal arming.
 
 ### Config (TOML)
 
@@ -402,14 +430,15 @@ When a rearm button is configured:
   Clears any latched fault and disables monitoring.
 
 - **Long press** → rearm  
-  Clears any latched fault and returns the monitor to an enabled + armed state.
+  Clears a latched fault and returns the monitor to an enabled + armed state.
+  Only honored while latched; otherwise it logs `rearm_ignored` and changes nothing.
 
 This behavior is validated by `run_doctor` and exercised by the integration tests.
 
 
 ### Testing
 
-The integration test suite simulates:
+The test suite simulates:
 
 - Marlin-style serial streams
 - GPIO motion pulses
@@ -418,8 +447,13 @@ The integration test suite simulates:
 - rearm button presses
 - filament runout
 
-Run integration tests with:
+The in-process simulation of the sequence above runs as part of the **default** `pytest` run.
+The end-to-end test that spawns the daemon as a subprocess against a virtual (PTY) serial port
+is marked `integration` and excluded by default; run it with:
 
 ```bash
 pytest -m integration
 ```
+
+The end-to-end test requires **pyserial**. If pyserial is missing, an explicit `-m integration`
+run fails loudly rather than silently skipping the only true end-to-end serial test.

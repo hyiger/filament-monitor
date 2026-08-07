@@ -8,7 +8,34 @@ from pathlib import Path
 
 import pytest
 
-serial = pytest.importorskip("serial")
+# The monitor subprocess needs pyserial to open the PTY. Detect it up front so an
+# explicit `pytest -m integration` run fails loudly instead of silently skipping
+# the only true end-to-end serial test.
+try:
+    import serial  # noqa: F401
+    _HAVE_PYSERIAL = True
+except ImportError:
+    _HAVE_PYSERIAL = False
+
+
+@pytest.fixture(autouse=True)
+def _require_pyserial(request):
+    if _HAVE_PYSERIAL:
+        return
+    markexpr = request.config.getoption("markexpr", "") or ""
+    if "integration" in markexpr and "not integration" not in markexpr:
+        # The user explicitly selected the integration marker (`pytest -m
+        # integration`); do not let the run look green while skipping it.
+        pytest.fail(
+            "pyserial is not installed but the integration marker was explicitly "
+            "selected. Install pyserial (pip install pyserial) to run the "
+            "end-to-end virtual serial test.",
+            pytrace=False,
+        )
+    pytest.skip(
+        "pyserial not installed; skipping end-to-end virtual serial test "
+        "(install pyserial to run it)"
+    )
 
 
 def _read_available(fd: int, timeout_s: float = 0.2) -> bytes:

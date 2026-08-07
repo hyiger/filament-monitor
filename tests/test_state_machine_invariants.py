@@ -1,27 +1,7 @@
 import pytest
 
-from builtins import DummyGPIO
+from builtins import CapturingLogger, DummyGPIO, DummySerial
 from filmon.state import MonitorMode
-
-
-class CapturingLogger:
-    """Minimal logger that matches the monitor's .emit(event, **fields) contract."""
-    def __init__(self):
-        self.events = []
-
-    def emit(self, event: str, **fields):
-        self.events.append((event, fields))
-
-
-class DummySerial:
-    def __init__(self):
-        self.writes = []
-
-    def write(self, data: bytes):
-        self.writes.append(data.decode(errors="replace"))
-
-    def flush(self):
-        pass
 
 
 def _make_monitor(monkeypatch, jam_timeout_s=1.0, **kwargs):
