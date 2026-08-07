@@ -201,19 +201,22 @@ def main():
     exit_code = 0
     while not stop.is_set():
         t = getattr(mon, "_serial_thread", None)
-        if t is not None and not t.is_alive():
-            # The reader reconnects on its own (a reconnecting thread is still
-            # alive), so a dead thread means it truly crashed unexpectedly.
-            logger.emit("serial_thread_dead")
-            exit_code = 3
-            stop.set()
-            break
+        # Check the monitor loop FIRST: a loop failure sets the shared stop
+        # event, which also ends the serial reader — checking the reader first
+        # would misreport that cascade as exit 3 and hide the real fault.
         lt = getattr(mon, "_loop_thread", None)
         if lt is not None and not lt.is_alive():
             # The main loop is the jam detector; without it the daemon only
             # looks healthy. Exit non-zero so systemd restarts us.
             logger.emit("monitor_loop_dead")
             exit_code = 4
+            stop.set()
+            break
+        if t is not None and not t.is_alive():
+            # The reader reconnects on its own (a reconnecting thread is still
+            # alive), so a dead thread means it truly crashed unexpectedly.
+            logger.emit("serial_thread_dead")
+            exit_code = 3
             stop.set()
             break
         time.sleep(0.2)

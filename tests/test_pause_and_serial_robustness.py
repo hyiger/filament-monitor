@@ -337,3 +337,22 @@ def test_pause_delivered_when_only_m400_fails(monkeypatch):
     mon._maybe_pause_retry()
     assert mon._ser.writes == writes_before
     assert "pause_retry" not in logger.names()
+
+
+def test_pulse_deque_bounded_while_disabled(monkeypatch):
+    """Pulses arriving while DISABLED must still be pruned by the main loop —
+    the callback is append-only and no detection path runs in that mode
+    (Codex review on #39)."""
+    m, mon, logger, notifier = _make_monitor(monkeypatch, jam_timeout_s=1.0)
+    t = {"now": 5000.0}
+    monkeypatch.setattr(m.time, "monotonic", lambda: t["now"], raising=True)
+
+    mon._handle_control_marker("filmon:reset")  # DISABLED
+    for _ in range(300):
+        mon._on_motion_pulse()
+        t["now"] += 0.1
+    assert len(mon._pulse_times) > 250  # accumulated (no prune ran yet)
+
+    # One loop pass while still DISABLED prunes to the pps window (2 s => ~20).
+    mon._loop_once()
+    assert len(mon._pulse_times) <= 25

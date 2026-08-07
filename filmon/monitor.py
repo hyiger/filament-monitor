@@ -888,6 +888,10 @@ class FilamentMonitor:
             self._handle_control_marker(line)
         except queue.Empty:
             pass
+        # Prune here unconditionally: the pulse callback is append-only, and
+        # while DISABLED neither _maybe_jam nor the heartbeat reaches _pps(),
+        # so without this a disabled-but-pulsing daemon grows the deque forever.
+        self._prune_pulses(now_s())
         self._reconcile_runout()
         self._maybe_jam()
         self._maybe_pause_retry()
